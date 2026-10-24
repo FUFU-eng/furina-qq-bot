@@ -1,0 +1,29 @@
+[project]
+name = "furina-qq-bot"
+version = "2.0.0a1"
+description = "芙宁娜 QQ 群机器人 v2（NoneBot2 + OneBot V11 / NapCat）"
+requires-python = ">=3.11"
+dependencies = [
+    "nonebot-plugin-genshinuid @ git+https://github.com/KimigaiiWuyi/GenshinUID.git@e57b76a089365357b3581bf605127842d1bd31dc",
+    "nonebot2[fastapi]==2.5.0",
+    "nonebot-adapter-onebot==2.4.6",
+    "httpx==0.28.1",
+    "Pillow==11.3.0",
+    "qrcode[pil]>=7.4,<9",
+    "loguru==0.7.3",
+    "uvicorn==0.48.0",
+    "python-dotenv",
+    "pypinyin",
+    "curl_cffi",
+    "selenium==4.46.0",
+    "webdriver-manager==4.1.2",
+]
+
+[tool.nonebot]
+adapters = [{ name = "OneBot V11", module_name = "nonebot.adapters.onebot.v11" }]
+plugins = []
+plugin_dirs = []
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"

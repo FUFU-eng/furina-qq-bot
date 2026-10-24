@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>芙宁娜控制面板</title>
+<link rel="stylesheet" href="/static/app.css?v=__VERSION__">
+<script>window.PANEL = { token: "__PANEL_TOKEN__", version: "__VERSION__" };</script>
+</head>
+<body>
+<div id="app" class="app">
+  <!-- 背景：默认主视觉（模糊底图 + 右侧立绘）或自定义壁纸轮播 -->
+  <div class="bg" id="bg">
+    <div class="bg-layer" id="bgA"></div>
+    <div class="bg-layer" id="bgB"></div>
+    <div class="bg-splash" id="bgSplash"></div>
+    <div class="bg-shade"></div>
+  </div>
+
+  <header class="titlebar" data-drag>
+    <img class="brand" id="brandLogo" alt="Furina" src="/media/asset/logo">
+    <div class="titlebar-space" data-drag></div>
+    <div class="win-btns">
+      <button class="win-btn" data-host="minimize" title="最小化"><svg viewBox="0 0 24 24"><path d="M5 12h14"/></svg></button>
+      <button class="win-btn close" data-host="close" title="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+  </header>
+
+  <nav class="rail" id="rail">
+    <button class="rail-toggle" id="railToggle" title="收起 / 展开侧栏"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
+    <div class="rail-items" id="railItems"></div>
+    <div class="rail-foot">
+      <button class="rail-status" id="railStatus" title="打开登录助手">
+        <span class="dot"></span><span class="rail-label" id="railStatusText">状态待确认</span>
+      </button>
+    </div>
+  </nav>
+
+  <main class="stage" id="stage">
+    <!-- 主页 -->
+    <section class="page page-home active" data-page="home">
+      <div class="home-panel glass" id="homePanel">
+        <div class="home-head">
+          <img class="avatar" src="/media/asset/avatar" alt="">
+          <div class="home-title">
+            <div class="h-name" id="homeName">芙宁娜</div>
+            <div class="h-sub" id="homeSub">机器人未运行</div>
+          </div>
+          <div class="uptime"><span class="cap">运行时长</span><span id="uptime">--:--:--</span></div>
+        </div>
+        <div class="cards">
+          <button class="card" data-card="status"><span class="c-cap">芙芙状态</span><span class="c-val" id="cStatus">休息中</span><span class="c-hint" id="cStatusHint">点击启动后上线</span></button>
+          <button class="card" data-card="groups"><span class="c-cap">守护群聊</span><span class="c-val" id="cGroups">—</span><span class="c-hint">点击管理功能权限</span></button>
+          <button class="card" data-card="models"><span class="c-cap">模型调用</span><span class="c-val" id="cModels">0</span><span class="c-hint" id="cModelsHint">今日暂无调用</span></button>
+          <button class="card" data-card="chat"><span class="c-cap">今日聊天</span><span class="c-val" id="cChat">0</span><span class="c-hint">点击查看统计</span></button>
+        </div>
+        <div class="home-foot">
+          <button class="chip-btn" data-open="webui"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/></svg>WebUI</button>
+          <button class="chip-btn" data-action="paths"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg>路径</button>
+          <button class="chip-btn" data-go="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>设置</button>
+          <button class="chip-btn" data-action="help"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.1 9a3 3 0 015.8 1c0 2-3 3-3 3M12 17h.01"/></svg>帮助</button>
+        </div>
+      </div>
+      <div class="bg-dots" id="bgDots"></div>
+      <div class="launch">
+        <div class="launch-note" id="launchNote"></div>
+        <button class="start-btn" id="startBtn"><span class="sb-icon" id="startIcon"></span><span id="startText">启动机器人</span></button>
+        <button class="start-more" id="startMore" title="更多操作"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div class="menu" id="startMenu">
+          <button data-ctl="restart">重启机器人（保留 QQ 登录）</button>
+          <button data-ctl="restart_all">完全重启（含 NapCat）</button>
+          <button data-ctl="test">检查连接状态</button>
+          <button data-ctl="login">打开登录助手</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" data-page="features"></section>
+    <section class="page" data-page="commands"></section>
+    <section class="page" data-page="games"></section>
+    <section class="page" data-page="bili"></section>
+    <section class="page" data-page="perms"></section>
+    <section class="page" data-page="logs"></section>
+    <section class="page" data-page="roles"></section>
+    <section class="page" data-page="limits"></section>
+    <section class="page" data-page="stats"></section>
+    <section class="page" data-page="settings"></section>
+    <section class="page" data-page="about"></section>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+  <div class="modal-root" id="modalRoot"></div>
+  <div class="resize-grip" data-resize="rb"></div>
+</div>
+<script src="/static/qwebchannel.js"></script>
+<script src="/static/app.js?v=__VERSION__"></script>
+<script src="/static/games.js?v=__VERSION__"></script>
+</body>
+</html>

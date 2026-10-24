@@ -1,0 +1,31 @@
+# 配置和密钥
+.env
+.env.*
+!.env.example
+
+# 运行时数据
+data/
+logs/
+backups/
+assets/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
