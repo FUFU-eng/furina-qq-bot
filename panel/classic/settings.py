@@ -21,7 +21,7 @@ from PySide6.QtCore import (
     Property, QEasingCurve, QObject, QPoint, QPointF, QPropertyAnimation, QRect, QRectF, QSize, Qt,
     QTime, QTimer, QUrl, Signal,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPalette, QPen, QPixmap
+from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
@@ -55,6 +55,13 @@ QListWidget#nav::item:selected {{ background: rgba(255,209,102,0.10); }}
 QLabel#navTitle {{ font-size: 13px; font-weight: 700; color: #c6d1e2; }}
 QLabel#navTitle[active="true"] {{ color: @GOLD@; }}
 QLabel#navSub {{ font-size: 11px; color: #66768f; }}
+QLineEdit#navSearch {{ background: #111b2e; border: 1px solid rgba(255,255,255,0.08); border-radius: 9px; padding: 6px 10px; color: #e8eef8; }}
+QLineEdit#navSearch:focus {{ border-color: rgba(255,209,102,0.55); }}
+QListWidget#searchResults {{ background: transparent; border: none; outline: none; }}
+QListWidget#searchResults::item {{ border-radius: 10px; margin: 2px 10px; color: #66768f; }}
+QListWidget#searchResults::item:hover {{ background: rgba(255,255,255,0.04); }}
+QListWidget#searchResults::item:selected {{ background: rgba(255,209,102,0.10); }}
+QLabel#searchHit {{ font-size: 13px; font-weight: 700; color: #d3dcea; }}
 QLabel#pageTitle {{ font-size: 20px; font-weight: 700; color: #f8fafc; }}
 QLabel#pageDesc {{ font-size: 12px; color: @MUTED@; }}
 QFrame#card {{ background: #131e33; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }}
@@ -431,6 +438,14 @@ def _nav_icon(kind, color):
         p.drawLine(QPointF(c - 4, c - 1.5), QPointF(c - 4, c + 2.5))
         p.drawPoint(QPointF(c + 4, c - 1))
         p.drawPoint(QPointF(c + 6, c + 2))
+    elif kind == "brain":  # 模式与内核：芯片 + 引脚
+        p.drawRoundedRect(QRectF(c - 6.5, c - 6.5, 13, 13), 3, 3)
+        p.drawEllipse(QPointF(c, c), 2.4, 2.4)
+        for d in (-3.5, 3.5):
+            p.drawLine(QPointF(c + d, c - 6.5), QPointF(c + d, c - 10))
+            p.drawLine(QPointF(c + d, c + 6.5), QPointF(c + d, c + 10))
+            p.drawLine(QPointF(c - 6.5, c + d), QPointF(c - 10, c + d))
+            p.drawLine(QPointF(c + 6.5, c + d), QPointF(c + 10, c + d))
     elif kind == "huoren":  # 活人感：笑脸 + 小火花
         p.drawEllipse(QPointF(c - 1.5, c + 1.5), 7.5, 7.5)
         p.drawPoint(QPointF(c - 4, c))
@@ -1717,6 +1732,7 @@ _ENV = {spec[0]: spec for spec in schema_page_specs()}
 PAGES = (
     ("account", "账号与角色", "QQ 号与人格角色", AccountPage),
     ("model", "AI 模型", "接口与连接测试", ModelPage),
+    _ENV["brain"],
     _ENV["chat"],
     _ENV["huoren"],
     _ENV["voice"],
@@ -1730,6 +1746,7 @@ PAGES = (
     _ENV["search"],
     _ENV["jm"],
     _ENV["push"],
+    _ENV["login"],
     ("miyoushe", "米游社服务", "扫码绑定与自动签到", MiyoushePage),
     ("appearance", "外观", "壁纸与背景", AppearancePage),
     _ENV["other"],
@@ -1749,6 +1766,17 @@ class _ErrorPage(QWidget):
 
     def is_dirty(self):
         return False
+
+
+class _SearchEdit(QLineEdit):
+    """设置搜索框：有字时按 Esc 先清空，不直接关掉设置窗口。"""
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape and self.text():
+            self.clear()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class SettingsCenter(QDialog):
@@ -1783,12 +1811,29 @@ class SettingsCenter(QDialog):
         brand.addWidget(_label("设置", "brandTitle"))
         brand.addWidget(_label("机器人与控制面板配置", "brandSub"))
         sl.addLayout(brand)
+        # 总搜索：输入就在左侧列出所有页里匹配的设置项，点一下跳过去并高亮那一项
+        search_box = QVBoxLayout()
+        search_box.setContentsMargins(16, 0, 16, 12)
+        self.search = _SearchEdit()
+        self.search.setObjectName("navSearch")
+        self.search.setPlaceholderText("搜索设置项（Ctrl+F）")
+        self.search.setClearButtonEnabled(True)
+        self.search.setAccessibleName("搜索设置")
+        search_box.addWidget(self.search)
+        sl.addLayout(search_box)
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
         self.nav.setFocusPolicy(Qt.NoFocus)
         self.nav.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.nav.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         sl.addWidget(self.nav, 1)
+        self.results = QListWidget()
+        self.results.setObjectName("searchResults")
+        self.results.setFocusPolicy(Qt.NoFocus)
+        self.results.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.results.hide()
+        sl.addWidget(self.results, 1)
+        self._hits = []
         foot = QVBoxLayout()
         foot.setContentsMargins(20, 0, 20, 0)
         foot.setSpacing(10)
@@ -1811,7 +1856,108 @@ class SettingsCenter(QDialog):
             self.stack.addWidget(widget)
             self._add_nav(key, title, sub)
         self.nav.currentRowChanged.connect(self._on_nav)
+        self.search.textChanged.connect(self._on_search)
+        self.search.returnPressed.connect(self._open_first_result)
+        self.results.itemClicked.connect(self._open_result)
+        QShortcut(QKeySequence(QKeySequence.StandardKey.Find), self, activated=self._focus_search)
         self.select(initial)
+
+    # ===== 总搜索 =====
+    def _focus_search(self):
+        self.search.setFocus()
+        self.search.selectAll()
+
+    def _search_index(self):
+        """现搜现建（「其他配置项」是读 .env 动态生成的）：每页的页名、设置项名称、所在卡片、说明文字。"""
+        out = []
+        for (key, page), spec in zip(self.pages, PAGES):
+            title, sub = spec[1], spec[2]
+            out.append({"key": key, "page": title, "label": None, "name": title, "card": sub, "extra": "", "help": ""})
+            if not isinstance(page, QWidget):
+                continue
+            for frame in page.findChildren(QFrame, "card"):
+                labels = frame.findChildren(QLabel)
+                card = next((lb.text() for lb in labels if lb.objectName() == "cardTitle"), "")
+                current = None
+                for lb in labels:
+                    kind = lb.objectName()
+                    if kind == "fieldLabel" and lb.text().strip():
+                        current = {"key": key, "page": title, "label": lb, "name": lb.text().strip(), "card": card,
+                                   "extra": str(lb.property("searchExtra") or ""), "help": ""}
+                        out.append(current)
+                    elif kind == "help" and current is not None:
+                        current["help"] += " " + lb.text()
+        return out
+
+    def _on_search(self, text):
+        q = (text or "").strip().lower()
+        self.results.clear()
+        self._hits = []
+        if not q:
+            self.results.hide()
+            self.nav.show()
+            return
+        self.nav.hide()
+        self.results.show()
+        scored = []
+        for i, h in enumerate(self._search_index()):
+            for score, field in enumerate(("name", "extra", "card", "help")):
+                if q in (h[field] or "").lower():
+                    scored.append((score + (0 if h["label"] is not None else 0.5), i, h))
+                    break
+        scored.sort(key=lambda x: (x[0], x[1]))
+        for _score, _i, h in scored[:80]:
+            item = QListWidgetItem()
+            item.setData(Qt.UserRole, len(self._hits))
+            item.setData(Qt.AccessibleTextRole, h["name"])
+            self._hits.append(h)
+            w = QWidget()
+            w.setAttribute(Qt.WA_TranslucentBackground, True)
+            vl = QVBoxLayout(w)
+            vl.setContentsMargins(14, 5, 12, 5)
+            vl.setSpacing(1)
+            vl.addWidget(_label(h["name"], "searchHit"))
+            where = h["page"] if h["label"] is None else " › ".join(x for x in (h["page"], h["card"]) if x)
+            vl.addWidget(_label(where if h["label"] is not None else f"页面 · {h['card']}", "navSub"))
+            item.setSizeHint(QSize(200, 48))
+            self.results.addItem(item)
+            self.results.setItemWidget(item, w)
+        if not self._hits:
+            empty = QListWidgetItem(f"没有找到「{text.strip()}」")
+            empty.setFlags(Qt.NoItemFlags)
+            empty.setSizeHint(QSize(200, 40))
+            self.results.addItem(empty)
+
+    def _open_first_result(self):
+        if self._hits:
+            self._open_result(self.results.item(0))
+
+    def _open_result(self, item):
+        idx = item.data(Qt.UserRole) if item is not None else None
+        if idx is None or not 0 <= idx < len(self._hits):
+            return
+        h = self._hits[idx]
+        self.select(h["key"])
+        page = self.page(h["key"])
+        if h["label"] is not None and page is not None:
+            QTimer.singleShot(0, lambda: self._reveal(page, h["label"]))
+
+    def _reveal(self, page, label):
+        try:
+            scroll = page.findChild(QScrollArea)
+            if scroll is not None and label.isVisibleTo(page):
+                scroll.ensureWidgetVisible(label, 0, 120)
+            old = label.styleSheet()
+            label.setStyleSheet(f"color: {GOLD}; background: rgba(255,209,102,0.16); border-radius: 4px; padding: 0 4px;")
+        except RuntimeError:  # 那一项已经被重新生成（比如「其他配置项」刚重载）
+            return
+
+        def restore():
+            try:
+                label.setStyleSheet(old)
+            except RuntimeError:
+                pass
+        QTimer.singleShot(1800, restore)
 
     def _add_nav(self, key, title, sub):
         item = QListWidgetItem()

@@ -27,6 +27,7 @@ _SPEC: dict[str, tuple[str, type, object]] = {
     "AI_CHAT_MAX_TOKENS": ("AI_CHAT_MAX_TOKENS", int, 512),
     "AI_CHAT_MAX_REPLY_CHARS": ("AI_CHAT_MAX_REPLY_CHARS", int, 0),  # 整段回复总字数上限；0 = 不限（每条短靠分条）
     "QUOTE_MAX_CHARS": ("AI_CHAT_QUOTE_MAX_CHARS", int, 1500),
+    "QUOTE_PROBABILITY": ("AI_CHAT_QUOTE_PROBABILITY", float, 0.15),  # 回人时引用对方那条的概率：真人偶尔才引用
     "FORWARD_MAX_NODES": ("AI_CHAT_FORWARD_MAX_NODES", int, 30),
     "GROUP_OWNER_QQ": ("AI_CHAT_GROUP_OWNER_QQ", str, ""),
     "SPECIAL_QQ": ("AI_CHAT_SPECIAL_QQ", str, ""),
@@ -61,6 +62,7 @@ _SPEC: dict[str, tuple[str, type, object]] = {
     "PROMPT_SIZE_LOG": ("AI_CHAT_PROMPT_SIZE_LOG", bool, True),  # 日志里记每次回复提示词各段多长（看钱花在哪）
     "HUMANIZE": ("AI_CHAT_HUMANIZE", bool, True),  # 先「打字」再发（1.2 秒 + 每字 110 毫秒，最多 6 秒；消息瞬间到达最像机器人）
     "TYPING_MS_PER_CHAR": ("AI_CHAT_TYPING_MS_PER_CHAR", int, 110),
+    "SEND_LIMIT_ENABLED": ("AI_CHAT_SEND_LIMIT_ENABLED", bool, True),  # 总开关：关掉 = 不管下面两个数，想发就发（熔断仍有效）
     "MAX_SEND_PER_MINUTE": ("AI_CHAT_MAX_SEND_PER_MINUTE", int, 6),   # 防风控：小鲸鱼作者 20/300 被腾讯限过
     "MAX_SEND_PER_HOUR": ("AI_CHAT_MAX_SEND_PER_HOUR", int, 80),
     "LONG_GAP_PROBABILITY": ("AI_CHAT_LONG_GAP_PROBABILITY", float, 0.3),  # 连发时偶尔愣 4~12 秒（像被打断）

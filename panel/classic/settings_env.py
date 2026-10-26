@@ -9,7 +9,7 @@ import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QValidator
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QLineEdit, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QSpinBox, QVBoxLayout, QWidget
 
 from ..services import envfile
 from ..services import huoren_settings
@@ -30,6 +30,9 @@ CHAT = [
          "（在「活人感 → 随机接话会变高的时候」），以及 TA 有近况可问（本页「说话活人感」）。"
          "这里设成 0 = 完全不随机接话，上面那些也都不生效。命中的话日志会写「命中线 N%：原因」。", {}),
         ("AI_CHAT_DAILY_CHAT_LIMIT", "每人每日艾特次数", "int", 30, "群主不受限制；0 = 不限制。", _o(max=9999, suffix="次")),
+        ("AI_CHAT_LIMIT_NOTE", "次数用完时说一句再走", "bool", True,
+         "某人今天艾特次数用完的那一下，她按自己的性格回一句（比如嫌你今天找她太多、明天再来），之后今天才真的不理 TA。"
+         "每人每天只说这一次；关掉 = 用完就直接不理。", {}),
         ("AI_CHAT_DAILY_LIMIT_OVERRIDES", "个人额度例外", "text", "", "格式：QQ:次数 或 群号:QQ:次数，多个用逗号分隔；次数 0 = 无限。", {}),
         ("AI_CHAT_SUMMARY_COOLDOWN", "群聊总结冷却", "int", 120, "两次「总结一下」之间的最短间隔。", _o(max=86400, suffix="秒")),
         ("AI_CHAT_WELCOME_NEW_MEMBER", "欢迎新成员", "bool", True, "有人进群时芙芙打个招呼。", {}),
@@ -46,8 +49,11 @@ CHAT = [
         ("AI_CHAT_LLM_TIMEOUT", "模型超时", "int", 40, "单次调用最长等待时间。", _o(min=5, max=300, suffix="秒")),
     ]),
     ("发送节奏与防风控", "像真人一样先「打字」再发、等对方说完再回；限速防止刷屏被风控（参考小鲸鱼教程的防风控章节）。", [
+        ("AI_CHAT_SEND_LIMIT_ENABLED", "发言次数限制", "bool", True,
+         "总开关。关掉后不再限制每分钟、每小时发多少条，下面两个数字先保留，重新打开立刻恢复；"
+         "连续发送失败时的熔断保护不受影响。关掉后她话多时更容易被 QQ 风控，费用也会上去。", {}),
         ("AI_CHAT_MAX_SEND_PER_MINUTE", "每群每分钟最多发", "int", 6, "防风控（教程作者 20/300 被限过，推荐 6）：超过就不发（她会知道那几句没发出去）；0 = 不限制。", _o(max=120, suffix="条")),
-        ("AI_CHAT_MAX_SEND_PER_HOUR", "全部群每小时最多发", "int", 80, "推荐 80；超过就不发；0 = 不限制。", _o(max=5000, suffix="条")),
+        ("AI_CHAT_MAX_SEND_PER_HOUR", "每群每小时最多发", "int", 80, "每个群分开算，推荐 80；超过就不发；0 = 不限制。", _o(max=5000, suffix="条")),
         ("AI_CHAT_HUMANIZE", "模拟打字延迟", "bool", True, "先按字数「打字」再发：1.2 秒 + 每字的打字时间，最多 6 秒，±20% 抖动，凌晨更慢；模型思考已经花掉的时间会扣掉。消息瞬间完整到达最像机器人。", {}),
         ("AI_CHAT_TYPING_MS_PER_CHAR", "每字打字时间", "int", 110, "仅在打开「模拟打字延迟」时有效。", _o(min=10, max=1000, suffix="毫秒")),
         ("AI_CHAT_LONG_GAP_PROBABILITY", "连发时偶尔愣一下", "pct", 0.3, "连发几条时，每条之间有这么大概率多停 4~12 秒，像被什么打断了。", {}),
@@ -235,7 +241,20 @@ PUSH = [
     ]),
 ]
 
+LOGIN = [
+    ("QQ 掉线自动恢复", "QQ 被腾讯踢下线（「登录已失效」）后，先自动用快速登录（免扫码）重启机器人用的 NapCat；"
+                      "登不上才出二维码等你扫。不会碰你自己开的 QQ。", [
+        ("NAPCAT_AUTO_RECOVER", "掉线后自动重新登录", "bool", True, "关掉 = 掉线后等你在登录助手里手动处理。", {}),
+        ("NAPCAT_RECOVER_DELAY", "掉线后先等", "int", 120, "等这么久还没恢复才动手（网络抖一下会自己好）。", _o(min=10, max=1800, suffix="秒")),
+        ("NAPCAT_RECOVER_COOLDOWN_MIN", "自动恢复最多每", "int", 30, "这段时间内只自动试一次，免得反复重启。", _o(min=5, max=1440, suffix="分钟")),
+    ]),
+]
+
+from ..services.brain_settings import BRAIN  # noqa: E402  「模式与内核」页的设置项（页面类在 brain_page.BrainPage）
+
 SCHEMA_PAGES = [
+    ("brain", "模式与内核", "四种模式、醒来条件、思考强度、表情包", "她用哪种方式聊天（二代仿真 / 一代仿真 / 聊天 / Agent）、"
+     "二代仿真什么时候醒来、回复前想多深、表情包本子。设置项保存后实时生效。", BRAIN),
     ("chat", "聊天回复", "触发、额度、风格、节奏", "芙芙怎么回、回多少、多快回。保存后实时生效，不用重启。", CHAT),
     ("context", "聊天上下文", "记忆长度与理解对话", "芙芙能看到多少聊天记录、怎么理解谁在跟谁说话。保存后实时生效。", CONTEXT),
     ("interact", "互动与表情", "戳一戳、表情、看图、好感", "保存后实时生效。", INTERACT),
@@ -243,6 +262,7 @@ SCHEMA_PAGES = [
     ("search", "搜图与强化", "以图搜图、超分参数", "以图搜图和图片强化的参数。大多要重启机器人后生效。", SEARCH),
     ("jm", "JM 下载", "代理、额度、缓存", "保存后实时生效。", JM),
     ("push", "推送与转发", "米游社推送、图片转发", "改完需要重启机器人后生效。", PUSH),
+    ("login", "QQ 掉线恢复", "掉线后自动免扫码重登", "QQ 掉线后怎么自动恢复。保存后实时生效。", LOGIN),
     # 活人感 / 语音 / B站生活 / 联网搜索：每组单独一页，字段与网页面板共用 panel/services/huoren_settings.py
     *huoren_settings.classic_pages(),
 ]
@@ -439,7 +459,9 @@ class EnvPage(SettingsPage):
         texts.setSpacing(2)
         head = QHBoxLayout()
         head.setSpacing(8)
-        head.addWidget(_label(f.label, "fieldLabel"))
+        name = _label(f.label, "fieldLabel")
+        name.setProperty("searchExtra", f.key)  # 键名不再显示，但设置搜索里仍能按键名搜到
+        head.addWidget(name)
         if f.restart:
             tag = _chip("需重启", "warn")
             tag.setToolTip("改完要重启机器人才生效")
@@ -448,11 +470,6 @@ class EnvPage(SettingsPage):
         texts.addLayout(head)
         if f.help:
             texts.addWidget(_label(f.help, "help", wrap=True))
-        key = QLabel(f.key)
-        key.setObjectName("help")
-        key.setStyleSheet("color: #4f5f78; font-size: 11px;")
-        key.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        texts.addWidget(key)
         row.addLayout(texts, 1)
         row.addWidget(f.widget, 0, Qt.AlignVCenter | Qt.AlignRight)
         layout.addLayout(row)
@@ -598,7 +615,12 @@ def make_schema_page_class(key, title, desc, cards):
 
 def schema_page_specs():
     """返回 (key, 导航标题, 导航副标题, 页面类)，追加到设置中心的 PAGES。"""
-    specs = [(k, t, sub, make_schema_page_class(k, t, d, cards)) for k, t, sub, d, cards in SCHEMA_PAGES]
+    from .brain_page import BrainPage
+
+    specs = []
+    for k, t, sub, d, cards in SCHEMA_PAGES:
+        base = BrainPage if k == "brain" else EnvPage
+        specs.append((k, t, sub, type(f"EnvPage_{k}", (base,), {"key": k, "title": t, "desc": d, "_cards": cards})))
     specs.append(("other", "其他配置项", ".env 里其余的设置", OtherEnvPage))
     return specs
 

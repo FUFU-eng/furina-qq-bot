@@ -219,6 +219,15 @@ def take_history(group_id, nickname, store, current_text, quote, full_user):
 
 async def fetch_stickers(event) -> list:
     # 带上收藏表情包列表，让模型按语境自己挑（拉取失败就纯文字）
+    # 表情包本子开着且有带备注的表情：按备注挑（模型看到的是备注，不是一串链接）
+    try:
+        from . import stickerlib
+
+        lib = stickerlib.prompt_stickers()
+        if lib:
+            return lib
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[表情包] 读取表情包本子失败: {e}")
     try:
         bot = bot_for(event)
         sticker_urls = await stickers.fetch_sticker_urls(bot)
@@ -270,6 +279,15 @@ def build_system_prompt(event, group_id, current_text, quote, context_note, stic
                 system_prompt += "\n\n" + user_emo
     except (OSError, ValueError, TypeError):
         logger.warning("[AI聊天] 心情数据异常，暂不注入；原数据保留")
+    # 烦躁值：被找烦了是会攒着的（纯本地，零 token）
+    try:
+        from ...services import annoy
+
+        _annoy_note = annoy.note([getattr(event, "user_id", "")])
+        if _annoy_note:
+            system_prompt += "\n\n" + _annoy_note
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[AI聊天] 烦躁值提示失败: {e}")
     # 当前对象的真实好感程度 + 问好感时由模型自行理解并自然作答（不报数字）
     _favor_note = favor.favor_note(event.user_id, getattr(event, "self_id", None))
     if _favor_note:
@@ -290,7 +308,17 @@ def build_system_prompt(event, group_id, current_text, quote, context_note, stic
         digest_note = digest.get_digest_note(group_id)
         if digest_note:
             system_prompt += "\n\n" + digest_note
-    if sticker_urls:
+    _notes = getattr(sticker_urls, "notes", None)
+    if sticker_urls and _notes:
+        lines = "\n".join(f"{i + 1}. {n}" for i, n in enumerate(_notes))
+        system_prompt += (
+            "\n\n你可以发自己收藏的表情包（后面是你给它写的备注），编号从1开始：\n"
+            f"{lines}\n"
+            "语境合适时，在回复里加上 <<STICKER:编号>> 就能带一张（例如「晚安~ <<STICKER:5>>」），"
+            "按备注挑最贴的那张；尖括号方向必须是两个左尖括号在前、两个右尖括号在后；"
+            "平均每三次回复最多用一次，大多数时候纯文字就好，别硬塞。"
+        )
+    elif sticker_urls:
         lines = "\n".join(f"{i + 1}. {u}" for i, u in enumerate(sticker_urls[: config.STICKER_MAX_COUNT]))
         system_prompt += (
             "\n\n你可以发自己的 QQ 收藏表情包，编号从1开始：\n"
@@ -320,6 +348,12 @@ def build_system_prompt(event, group_id, current_text, quote, context_note, stic
         huoren_note = ""
     if huoren_note:
         system_prompt += "\n\n" + huoren_note
+    try:
+        from . import banned
+
+        system_prompt += "\n" + banned.prompt_line()
+    except Exception:  # noqa: BLE001
+        pass
     # 群里正聊到钱 / token / 框架：告诉她这就是她自己的饭钱，带上真实账目（不调模型）
     try:
         upkeep_note = upkeep.note(group_id, _lore_query)

@@ -445,9 +445,9 @@ class BotControlMixin:
         """登录助手里的「重启 NapCat」，只在用户点击时执行。
 
         - 只重启机器人用的 NapCat / QQ 进程树：不碰用户自己打开的 QQ，也不停 NoneBot；
-        - 不带 -q 快速登录参数：登录已失效时快速登录必然失败，还会让 WebUI 先弹一次「登录失败」，
-          不带参数时 NapCat 启动后直接生成新二维码；
-        - 仍需用户在手机上用机器人账号扫码确认，不会自动登录。
+        - 先带 QQ 号快速登录（免扫码）：被踢下线后很多时候凭据还能用，60 秒内上线就不用扫码；
+        - 快速登录不成功再不带参数重启，直接生成新二维码，用机器人账号扫码。
+        逻辑在 furina/services/napcat_recover.py（掉线后的自动恢复也用它）。
         返回 False 表示有别的操作正在进行，本次没有执行。
         """
         if self.busy:
@@ -459,27 +459,18 @@ class BotControlMixin:
         qq = self._read_env_value("BOT_QQ").strip()
 
         def run():
-            launched = False
-            started = time.time()
+            from furina.services import napcat_recover
+
+            result = ""
             try:
-                self.signals.log.emit("info", "[登录] 正在重启 NapCat（只重启机器人用的 QQ，你自己开的 QQ 不受影响）...")
-                self._kill_napcat_processes()
-                self.napcat_proc = subprocess.Popen(
-                    ["cmd.exe", "/k", "launcher-user.bat"],
-                    cwd=NAPCAT_DIR, creationflags=_NO_WINDOW,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
-                launched = True
-                if self._wait_for_new_qrcode(started, timeout=60):
-                    self.signals.log.emit("success", f"[登录] NapCat 已重启并生成新二维码，请用机器人账号 {qq} 扫码")
-                else:
-                    self.signals.log.emit("warn", "[登录] NapCat 已启动，但 60 秒内没有生成新二维码；可在 WebUI 点「重新获取二维码」")
+                result = napcat_recover.relogin(
+                    qq, reason="登录助手", on_event=lambda level, msg: self.signals.log.emit(level, "[登录] " + msg))
             except Exception as e:
                 self.signals.log.emit("error", f"[登录] 重启 NapCat 失败：{e}")
             finally:
                 self.signals.busy.emit(False)
-            if launched:
-                self._monitor_napcat_login(qq, generation, timeout=600)
+            if result in ("quick_ok", "qr", "qr_missing"):
+                self._monitor_napcat_login(qq, generation, timeout=30 if result == "quick_ok" else 600)
 
         threading.Thread(target=run, daemon=True).start()
         return True

@@ -1,20 +1,23 @@
-"""手机端筛图接口：只监听 127.0.0.1，由 Cloudflare 隧道转出去；每个请求都要带连接密码。
+"""手机端筛图接口：只监听 127.0.0.1，由 Cloudflare 隧道转出去；默认不需要密码，可在设置里开启连接密码。
 
 单独一个 uvicorn，跑在后台线程里（不占 NoneBot 的 8080，也不会接管 Ctrl+C）。
 """
 from __future__ import annotations
 
 import threading
+import re
 import time
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from nonebot import logger
+from starlette.concurrency import run_in_threadpool
 
 from ...services import pic_inbox as svc
 
 _fails: dict[str, list[float]] = {}
 _FAIL_MAX, _FAIL_WINDOW = 10, 600
+_op_locks = [threading.Lock() for _ in range(32)]
 
 
 def _client_ip(req: Request) -> str:
@@ -49,6 +52,29 @@ def _item(it: dict, names: dict) -> dict:
     return d
 
 
+def _once(body: dict, action) -> dict:
+    """Android 的请求带随机操作号，回包丢了重发也不会再次删除/导出。只存操作结果，不存密码。"""
+    key = str(body.get("op") or "")
+    if not re.fullmatch(r"[0-9a-f]{32}", key):
+        return action()
+    ns = "pic_inbox_app_ops"
+    with _op_locks[int(key[:8], 16) % len(_op_locks)]:
+        old = svc.db.get(ns, key)
+        if old:
+            return old["result"]
+        res = action()
+        busy = res.get("reason") == "busy" or "busy" in (res.get("reasons") or {}).values()
+        if not busy:
+            svc.db.put(ns, key, {"ts": time.time(), "result": res})
+            # 滚动保留三天；不在每张图上扫数据库。
+            if key.endswith("00"):
+                cutoff = time.time() - 3 * 86400
+                for k, v in svc.db.items(ns).items():
+                    if v.get("ts", 0) < cutoff:
+                        svc.db.delete(ns, k)
+        return res
+
+
 def build_app() -> FastAPI:
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -58,10 +84,11 @@ def build_app() -> FastAPI:
         return {"ok": True, "name": "芙宁娜筛图", "stats": svc.stats()}
 
     @app.get("/api/list")
-    def list_items(req: Request, limit: int = 40, newest: int = 0):
+    def list_items(req: Request, limit: int = 40, newest: int = 0, offset: int = 0):
         _auth(req)
         names = _names()
-        rows = svc.pending(min(max(limit, 1), 200), newest_first=bool(newest))
+        rows = svc.pending(min(max(limit, 1), 500), newest_first=bool(newest), offset=offset)
+        svc.warm_previews([it["id"] for it in rows])  # 后台先把缩略图做好
         return {"items": [_item(it, names) for it in rows], "stats": svc.stats()}
 
     @app.get("/api/img/{iid}")
@@ -76,15 +103,38 @@ def build_app() -> FastAPI:
     async def decide(req: Request):
         _auth(req)
         body = await req.json()
-        res = svc.decide(str(body.get("id") or ""), bool(body.get("keep")))
+        res = await run_in_threadpool(_once, body, lambda: svc.decide(str(body.get("id") or ""), bool(body.get("keep"))))
+        return {**res, "stats": svc.stats()}
+
+    @app.post("/api/decide_many")
+    async def decide_many(req: Request):
+        _auth(req)
+        body = await req.json()
+        res = await run_in_threadpool(_once, body, lambda: svc.decide_many([str(i) for i in (body.get("ids") or [])][:500], bool(body.get("keep"))))
+        return {**res, "stats": svc.stats()}
+
+    @app.post("/api/undo_many")
+    async def undo_many(req: Request):
+        _auth(req)
+        body = await req.json()
+        res = await run_in_threadpool(_once, body, lambda: svc.undo_many([str(i) for i in (body.get("ids") or [])][:500]))
         return {**res, "stats": svc.stats()}
 
     @app.post("/api/undo")
     async def undo(req: Request):
         _auth(req)
         body = await req.json()
-        res = svc.undo(str(body.get("id") or ""))
+        res = await run_in_threadpool(_once, body, lambda: svc.undo(str(body.get("id") or "")))
         return {**res, "stats": svc.stats()}
+
+    @app.get("/app")
+    def app_apk():
+        """手机 App 安装包：浏览器打开这个地址就能下载安装（安装包里没有任何密码）。"""
+        p = svc.root() / "app" / "furina-pics.apk"
+        if not p.exists():
+            raise HTTPException(404, "安装包还没放上来")
+        return FileResponse(p, media_type="application/vnd.android.package-archive",
+                            filename="furina-pics.apk", headers={"Cache-Control": "no-cache"})
 
     @app.exception_handler(HTTPException)
     async def _err(_req, exc: HTTPException):

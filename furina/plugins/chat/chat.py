@@ -12,7 +12,7 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
 from . import actions, config, deai, humanize, learning, life_events, llm, memory, memory_intent, planner, prompting, selfacts, stickers, talkshape, transcript, tts, vision, voice
-from . import attention, boundary, diary, emotion, gallery, kouchan, people, presence, websearch
+from . import attention, banned, boundary, diary, emotion, gallery, kouchan, people, presence, stickerlib, websearch
 from .cleanup import (
     _is_awkward_sentence,
     _scrub_fixed_template,
@@ -30,7 +30,7 @@ from .matchers import _chat
 from .persona import DAILY_RULES, LORE, LORE_FULL, PERSONA, _asks_about_identity  # noqa: F401  兼容旧导入
 from .prompting import _asks_about_recent_image, _gap_label, _history_with_gaps  # noqa: F401  兼容旧导入
 from .quotes import _iter_segments  # noqa: F401
-from ...core import roles  # noqa: F401  兼容旧导入
+from ...core import brain, roles  # noqa: F401  roles 兼容旧导入
 from ...core.botref import bot_for
 
 # 后台任务保活：asyncio 只对任务保持弱引用，不保存引用的任务可能在执行中途被回收
@@ -71,7 +71,7 @@ async def _retry_reply(messages: list, prev_reply: str, instruction: str) -> str
     retry_messages.append({"role": "user", "content": instruction.strip()})
     try:
         reply2 = await llm.chat(retry_messages)
-        reply2 = (reply2 or "").strip().rstrip("。").strip()
+        reply2 = (reply2 or "").strip()
         reply2 = _strip_context_markers(reply2)
         reply2 = _scrub_fixed_template(reply2)
         reply2 = _trim_reply(reply2, config.AI_CHAT_MAX_REPLY_CHARS)
@@ -144,8 +144,7 @@ def _last_user_text(messages: list) -> str:
 async def _polish(messages: list, reply: str, group_id) -> str:
     """清洗模型输出；与最近回复雷同、铸币梗重复或句子绕口时重试一次（最多一次）。"""
     reply = (reply or "").strip()
-    # 结尾不要句号
-    reply = reply.rstrip("。").strip()
+    # 统一在末尾和发送闸门处理句号，不能rstrip误删表达无语的连续句号。
     # 去掉模型从上下文学来的 [图片] 尾巴
     reply = _strip_context_markers(reply)
     # 兜底清掉「宝~ 你怕不是个铸币哦～」这类固定开场模板
@@ -159,14 +158,21 @@ async def _polish(messages: list, reply: str, group_id) -> str:
     # 先剥掉 <<STICKER:n>> 再比相似度，否则表情标记会让原本重复的句子被当成"新话"
     reply_for_check = stickers.extract_sticker_marker(reply)[0] or reply
     retried = False
+    # 主人点名禁止的句式（「这X我服」等）：先让她重说一次，最后发出前还会兜底删掉那半句
+    _ban = banned.hit(reply_for_check)
+    if _ban:
+        logger.info(f"[AI聊天] 回复用了禁用句式「{_ban}」，重新生成一次: {reply_for_check[:40]}")
+        reply = await _retry_reply(messages, reply, banned.RETRY_HINT.format(name=_ban))
+        reply_for_check = stickers.extract_sticker_marker(reply)[0] or reply
+        retried = True
     # 去 AI 味：客服腔结尾、书面连接词直接删；自称 AI、markdown 标题加粗这类让模型重说一次
     if config.DEAI:
         reply = deai.soft_clean(reply)
-        _ai_why = deai.hard_problem(reply)
-        if _ai_why:
+        _ai_why = deai.hard_problem(reply) or deai.structure_problem(reply)
+        if _ai_why and not retried:
             logger.info(f"[AI聊天] 回复有 AI 味（{_ai_why}），重新生成一次")
             reply = await _retry_reply(messages, reply, deai.RETRY_HINT.format(why=_ai_why))
-            reply = deai.strip_markdown(deai.soft_clean(reply)).rstrip("。").strip()
+            reply = deai.strip_markdown(deai.soft_clean(reply)).strip()
             reply_for_check = stickers.extract_sticker_marker(reply)[0] or reply
             retried = True
     # 句式模板 / 口癖：「挺好看的，就是有点晃眼」这种先夸后挑刺的对仗句、评论家腔、最近说烂了的口头禅 → 重说一次
@@ -240,6 +246,9 @@ async def _polish(messages: list, reply: str, group_id) -> str:
     # 不打句号（真人聊天几乎不用）：句末删掉、句中换逗号
     if config.NO_PERIOD:
         reply = drop_periods(reply)
+    if banned.hit(reply):  # 重说完还用：直接删掉那半句（删光了就不发）
+        logger.info(f"[AI聊天] 群{group_id} 重说后仍用禁用句式「{banned.hit(reply)}」，删掉那半句")
+        reply = banned.strip(reply)
     return reply
 
 
@@ -253,6 +262,7 @@ def _pick_sticker(reply: str, sticker_urls: list, group_id, force: bool = False)
     picked = sticker_idx is not None and 0 <= sticker_idx < len(sticker_urls)
     if picked and force:
         logger.info(f"[AI聊天] 群{group_id} 附带收藏表情 #{sticker_idx + 1}")
+        stickerlib.mark_used_uri(sticker_urls[sticker_idx])
         return reply, sticker_urls[sticker_idx]
     # 模型没主动挑时按「附带表情包概率」随机配一张兜底；她挑的和兜底的记在同一本账上，
     # 整体附带比例不超过设置里的数（以前兜底不记账，实际比例会高出一截）
@@ -260,6 +270,7 @@ def _pick_sticker(reply: str, sticker_urls: list, group_id, force: bool = False)
     if _should_send_sticker(group_id, wanted=picked or fallback):
         idx = sticker_idx if picked else random.randrange(len(sticker_urls))
         logger.info(f"[AI聊天] 群{group_id} {'附带收藏表情' if picked else '随机兜底表情'} #{idx + 1}")
+        stickerlib.mark_used_uri(sticker_urls[idx])
         return reply, sticker_urls[idx]
     if picked:
         logger.info(f"[AI聊天] 群{group_id} 表情频率已达上限，本次略过")
@@ -276,7 +287,7 @@ async def _send_text(sender, event, reply: str, sticker_url, forced: bool, group
     # forced 时随机选择：有时候用引用格式（MessageSegment.reply），有时候只艾特，不要每次都一样
     # mention=False：和机器人收尾时不艾特也不引用（对方机器人被点名/被引用就会接着回）
     at = forced if mention is None else bool(mention)
-    use_reply = at and random.random() < 0.5
+    use_reply = at and random.random() < config.QUOTE_PROBABILITY  # 偶尔引用，平时只艾特
     if not reply and sticker_url:
         # 只回一张表情包：被艾特时一半概率引用对方那条，不单独再发一条只有艾特的消息
         segs = []
@@ -303,7 +314,7 @@ async def _send_text(sender, event, reply: str, sticker_url, forced: bool, group
                 segs.append(MessageSegment.reply(msg_id))
             segs.append(MessageSegment.at(event.user_id))
         segs.append(MessageSegment.text((" " if at and idx == 0 else "") + part))
-        await sender(Message(segs))
+        await sender(humanize.prepare_message(Message(segs)))
     if sticker_url:
         if parts:
             await humanize.pause(humanize.gap_before(""))
@@ -373,6 +384,11 @@ def _turn_notes(group_id, user_id, nickname, current_text, has_image, forced, co
         for extra in (talkshape.note(current_text, forced), talkshape.repeat_note(group_id) if not forced else ""):
             if extra:
                 notes.append(extra)
+    # 群友刚发了表情包：喜欢可以收藏（表情包本子）
+    if not sticker_only:
+        hint = stickerlib.save_hint(group_id)
+        if hint:
+            notes.append(hint)
     # 她自己刚做过的小动作（贴表情 / 戳一戳）：被问到要承认是自己做的
     acts = selfacts.note(group_id, user_id)
     if acts:
@@ -449,6 +465,8 @@ async def _reply(event, group_id, nickname, store, current_text, has_image, quot
     turn_extra：调用方附加的这一轮提示（如「TA 话好像没说完」）。
     返回 True 表示应交给搜图插件处理。
     """
+    if humanize.skip_if_limited(group_id):
+        return  # 发不出去就不看图、不判断、不生成，省下模型调用
     sender = humanize.guarded(send_func or _chat.send, group_id)
     meta = transcript.event_meta(event, nickname)
     attach_images, quote_image_count, recent_image_note = await prompting.gather_images(
@@ -528,14 +546,20 @@ async def _reply(event, group_id, nickname, store, current_text, has_image, quot
                                               transcript_text=transcript_text, plan_note=plan_note)
 
     start = time.time()
+    # 思考强度（面板「模式与内核 → 思考强度」，群可单独设；自动档：随机插话不想，被问问题 / 查资料时想）
+    think = brain.effort_for(group_id, "at" if (forced and not context_note) else "random", current_text)
+    think_search = brain.escalated_effort(group_id, think)
     ask_query = websearch.explicit_query(current_text) if search_on else None
     if ask_query:
         found = await websearch.lookup(ask_query, group_id)
         if found:
             websearch.add_to_system(messages, found + "\n（是对方叫你查的，可以自然地说「我看了下」，但别念结果、别贴链接；直接回，别再写 <<SEARCH>>。）")
             searched = True
+            think = think_search
+    if think != "off":
+        logger.info(f"[思考] 群{group_id} 这轮思考强度：{brain.EFFORT_NAMES.get(think, think)}")
     try:
-        reply = await llm.chat(messages)
+        reply = await llm.chat(messages, effort=think)
         reply, want_query = websearch.extract(reply)
         if want_query and search_on and not searched:
             wait = websearch.wait_line() if forced else None
@@ -547,11 +571,11 @@ async def _reply(event, group_id, nickname, store, current_text, has_image, quot
             found = await websearch.lookup(want_query, group_id)
             if found:
                 websearch.add_to_system(messages, found + "\n现在直接回复对方，别再写 <<SEARCH>>。")
-                reply, _again = websearch.extract(await llm.chat(messages))
+                reply, _again = websearch.extract(await llm.chat(messages, effort=think_search))
                 searched = True
             else:
                 websearch.add_to_system(messages, "【这次没法看资料】就当自己不太清楚，随口说不确定就好，别提搜索。")
-                reply, _again = websearch.extract(await llm.chat(messages))
+                reply, _again = websearch.extract(await llm.chat(messages, effort=think))
         if searched and websearch.leaks(reply, current_text):  # 露出「我搜了」的痕迹：让她换个说法（只重来一次）
             logger.info(f"[联网搜索] 群{group_id} 回复露了搜索痕迹，重说一次：{reply[:40]}")
             fixed, _q = websearch.extract(await llm.chat(messages + [{"role": "assistant", "content": reply},
@@ -567,6 +591,13 @@ async def _reply(event, group_id, nickname, store, current_text, has_image, quot
         return
     cost = time.time() - start
 
+    # <<SAVE_STICKER:备注>>：群友刚发的表情包她喜欢，收进自己的表情包本子
+    reply, save_note = stickerlib.extract_save(reply)
+    if save_note is not None:
+        try:
+            stickerlib.spawn_save(bot_for(event), group_id, save_note)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[表情包] 收藏失败: {e}")
     # <<KEEP:为什么留它>>：她想把这张图存进自己的相册
     reply, keep_why = gallery.extract(reply)
     if keep_why and keep_ok:
@@ -630,6 +661,8 @@ async def _reply(event, group_id, nickname, store, current_text, has_image, quot
         logger.info(f"[AI聊天] 群{group_id} {nickname} 在生成期间又补充了消息，丢弃旧稿重新生成")
         return "RETRY"
 
+    if config.NO_PERIOD and reply:
+        reply = drop_periods(reply)
     logger.info(f"[AI聊天] 群{group_id} 回复内容: {(reply or '')[:150]}")
     # 记忆里只存干净的「昵称：内容」，不存"当前场景/说话人"等系统说明，
     # 避免模型把元信息当成群友原话照抄或混淆说话人
@@ -739,14 +772,26 @@ _MEMORY_HINTS = (
 )
 
 
+def _recent_context(group_id, n: int = 8) -> str:
+    """意图识别用的最近几条聊天（她自己说的标「机器人」），让「把设定去掉」这种指代能对上。"""
+    rows = []
+    for m in (memory.get_history(group_id) or [])[-n:]:
+        c = str(m.get("content") or "").replace("\n", " ")[:120]
+        rows.append(("机器人：" + c) if m.get("role") == "assistant" else c)
+    return "\n".join(rows)
+
+
 async def _handle_memory_intent(event, group_id, user_id, nickname, text, has_at_bot, raw: str = ""):
     """AI 理解自然语言里的词条/设定/外号增删查意图，命中就执行并回执。"""
     if not has_at_bot or not (text or "").strip():
         return False
     if not any(h in text for h in _MEMORY_HINTS):
         return False
+    if humanize.skip_if_limited(group_id):
+        return False
     mentioned = await _mentioned_names(event, group_id, raw) if raw else []
-    intent = await memory_intent.detect_memory_action(group_id, nickname, text, mentioned=mentioned)
+    intent = await memory_intent.detect_memory_action(group_id, nickname, text, mentioned=mentioned,
+                                                      context=_recent_context(group_id))
     if not intent:
         return False
     action = intent["action"]
@@ -759,6 +804,10 @@ async def _handle_memory_intent(event, group_id, user_id, nickname, text, has_at
         reply_text = f"记住了，{fact}" if changed else f"这条早就记过啦，{fact}"
     elif action == "delete":
         count, deleted = learning.delete_settings(group_id, target, value)
+        if not count:  # 「删除ntr苦主，铸币」：只说了内容没说是谁的，按内容找
+            count, deleted = learning.delete_by_value(group_id, f"{target}，{value}" if value else target)
+            if count:
+                target = learning._fact_target(deleted[0])[0] or target
         disp = learning.resolve_target(group_id, target, nickname) or target
         if not count:
             reply_text = f"嗯？好像没有{disp}的设定呢"
@@ -790,7 +839,11 @@ async def _handle_memory_intent(event, group_id, user_id, nickname, text, has_at
             MessageSegment.text(f" {reply_text}"),
         ]))
         logger.info(f"[AI聊天] 群{group_id} 记忆意图完成：{action} target={target} value={(value or '')[:40]}")
-        return True
     except Exception as e:
         logger.warning(f"[AI聊天] 记忆意图回执发送失败: {e}")
-        return True
+    # 回执也记进聊天记录：她（包括二代仿真）之后知道这是自己刚做的事
+    memory.add_message(group_id, "assistant", f"@{nickname} {reply_text}")
+    mid = str(getattr(event, "message_id", "") or "")
+    if mid:
+        memory.mark_replied(group_id, [mid], reply_text)
+    return reply_text

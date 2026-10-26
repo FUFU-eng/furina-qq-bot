@@ -28,6 +28,10 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) FurinaPanel/1.0"
 
 # 本地记账的功能标签（模块前缀）→ 人话
 FEATURE_NAMES = (
+    ("dsh.sim2", "二代仿真内核"),
+    ("dsh.agent", "Agent"),
+    ("chat.kernel", "二代仿真内核"),
+    ("chat.stickerlib", "表情包（看图写备注）"),
     ("chat.planner", "判断要不要接话 / 接谁"),
     ("chat.chat", "回复"),
     ("chat.handlers", "回复"),
@@ -316,11 +320,18 @@ def fetch_web(token: str | None = None, now: float | None = None) -> dict:
 
 
 # ---------------- 3. 本地记账 ----------------
+THINK_MARK = "#思考"
+THINK_NAMES = {"low": "低", "high": "高", "max": "最高"}
+
+
 def feature_name(tag: str) -> str:
+    """调用来源 → 面板显示的功能名；开了思考的调用后面带「（思考·档位）」单列。"""
+    base, _, lvl = (tag or "").partition(THINK_MARK)
+    suffix = f"（思考·{THINK_NAMES.get(lvl, lvl)}）" if lvl else ""
     for prefix, name in FEATURE_NAMES:
-        if tag.startswith(prefix):
-            return name
-    return tag or "?"
+        if base.startswith(prefix):
+            return name + suffix
+    return (base or "?") + suffix
 
 
 def local_days(days: int = 30, today: date | None = None) -> dict[str, dict]:
@@ -349,7 +360,7 @@ def local_features(day: str | None = None) -> list[dict]:
         tags.setdefault(tag, {})[kind[7:]] = int(n)
     merged: dict[str, dict] = {}
     for tag, r in tags.items():
-        if tag == "?":
+        if tag.partition(THINK_MARK)[0] == "?":
             continue
         name = feature_name(tag)
         m = merged.setdefault(name, {"name": name, "tags": [], "calls": 0, "hit": 0, "miss": 0, "out": 0, "cost": 0.0})
@@ -358,6 +369,38 @@ def local_features(day: str | None = None) -> list[dict]:
             m[f] += r.get(f, 0)
         m["cost"] += r.get("cost_u", 0) / 1e6
     return sorted(merged.values(), key=lambda r: -r["cost"])
+
+
+def thinking_summary(day: str | None = None) -> dict:
+    """某天开了思考的调用：{calls, think, cost, by_level: {档位: {calls, think, cost}}, total_cost, sim2_cost, agent_cost}。
+    think = 思考用掉的 token（按输出价算钱，已经算在 cost 里）。"""
+    d = day or date.today().isoformat()
+    out = {"calls": 0, "think": 0, "cost": 0.0, "by_level": {}, "total_cost": 0.0, "sim2_cost": 0.0, "agent_cost": 0.0}
+    for _day, kind, tag, _u, n in db.usage_rows(d):
+        if _day != d or not kind.startswith("llmtok:"):
+            continue
+        field = kind[7:]
+        val = int(n)
+        cost = val / 1e6 if field == "cost_u" else 0.0
+        out["total_cost"] += cost
+        if tag.startswith("dsh.sim2"):
+            out["sim2_cost"] += cost
+        elif tag.startswith("dsh.agent"):
+            out["agent_cost"] += cost
+        _base, _, lvl = (tag or "").partition(THINK_MARK)
+        if not lvl:
+            continue
+        lv = out["by_level"].setdefault(THINK_NAMES.get(lvl, lvl), {"calls": 0, "think": 0, "cost": 0.0})
+        if field == "calls":
+            out["calls"] += val
+            lv["calls"] += val
+        elif field == "think":
+            out["think"] += val
+            lv["think"] += val
+        elif field == "cost_u":
+            out["cost"] += cost
+            lv["cost"] += cost
+    return out
 
 
 # ---------------- 合在一起 ----------------

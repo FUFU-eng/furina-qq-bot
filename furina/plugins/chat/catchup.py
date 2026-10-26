@@ -87,6 +87,8 @@ async def run(now: float | None = None) -> None:
         hist = memory.get_history(int(gid))
         if any(e.get("role") == "assistant" and float(e.get("ts") or 0) > float(item["ts"]) for e in hist):
             continue  # 她醒来以后已经说过话了，就不专门补了
+        if humanize.skip_if_limited(gid, "睡醒补看"):
+            continue
         recent = "\n".join(("你：" if e.get("role") == "assistant" else "") + str(e.get("content") or "")[:60]
                            for e in hist if float(e.get("ts") or 0) >= float(item["ts"]))[-600:] or "（没人再说话）"
         prompt = PROMPT.format(name=item.get("name") or "TA", when=time.strftime("%H:%M", time.localtime(item["ts"])),
@@ -107,7 +109,7 @@ async def run(now: float | None = None) -> None:
         for idx, line in enumerate(text.split("\n")):
             await humanize.pause(humanize.typing_seconds(line) if idx == 0 else humanize.burst_gap(line))
             if idx == 0:
-                segs = [MessageSegment.reply(int(item["mid"]))] if item.get("mid") else []
+                segs = [MessageSegment.reply(int(item["mid"]))] if item.get("mid") and random.random() < config.QUOTE_PROBABILITY else []
                 segs += [MessageSegment.at(int(item["uid"])), MessageSegment.text(" " + line)]
                 msg = Message(segs)
             else:

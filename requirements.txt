@@ -23,5 +23,8 @@ uvicorn>=0.30
 # 游戏助手：米游社扫码与可热配置的自动签到
 qrcode[pil]>=7.4,<9
 
+# B站直播：她当主播时的 AI 语音（微软免费女声）
+edge-tts>=7.0,<8
+
 # Official connector, installed in integrations/nonebot-env (not global Python).
 nonebot-plugin-genshinuid @ git+https://github.com/KimigaiiWuyi/GenshinUID.git@e57b76a089365357b3581bf605127842d1bd31dc

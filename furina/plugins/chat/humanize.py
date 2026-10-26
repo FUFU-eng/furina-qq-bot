@@ -2,7 +2,7 @@
 
 参考 ai-companion-kit 的 humanize.js 与其防风控章节：
 - 打字时间跟字数成正比但带抖动，凌晨更慢；模型生成已经花掉的时间从第一条里扣掉；
-- 每群每分钟 / 全局每小时条数上限，超了就不发（不排队、不重试）；
+- 每群每分钟 / 每群每小时条数上限（各群分开算），超了就不发（不排队、不重试）；
 - 连续 3 次发送失败熔断 3 分钟，期间 AI 聊天不再发消息，避免「重试风暴」。
 """
 import asyncio
@@ -51,16 +51,10 @@ def gap_before(text: str) -> float:
 
 
 def burst_gap(text: str) -> float:
-    """连发几条时，后面每条前的停顿（不管开没开「模拟打字」都停一下，像真人一条条打出来）。"""
+    """连发几条时，后面每条前的停顿。开着「模拟打字」按打字速度停；关掉就只隔不到 1 秒（保证顺序，不刻意拖）。"""
     if config.HUMANIZE:
         return gap_before(text)
-    n = len((text or "").strip())
-    s = min(4.0, 0.6 + n * 0.085) * (1 + random.uniform(-0.2, 0.2))
-    if random.random() < 0.12:
-        s += random.uniform(2.0, 6.0)
-    if NIGHT[0] <= time.localtime().tm_hour < NIGHT[1]:
-        s *= 1.4
-    return s
+    return random.uniform(0.4, 0.9)
 
 
 async def pause(seconds: float) -> None:
@@ -69,8 +63,8 @@ async def pause(seconds: float) -> None:
 
 
 # ---------------- 发送限速 + 熔断 ----------------
+# 每个群一条队列，存最近 1 小时内的发送时间；每分钟、每小时都按本群自己算，群与群互不占额度
 _group_sent: dict[int, deque] = defaultdict(deque)
-_all_sent: deque = deque()
 _breaker = {"fails": 0, "open_until": 0.0}
 BREAKER_FAILS = 3
 BREAKER_SECONDS = 180
@@ -86,20 +80,38 @@ def allow_send(group_id) -> tuple[bool, str]:
     if now < _breaker["open_until"]:
         return False, f"发送熔断中（还剩 {int(_breaker['open_until'] - now)} 秒）"
     g = _group_sent[int(group_id or 0)]
-    _prune(g, 60, now)
-    _prune(_all_sent, 3600, now)
+    _prune(g, 3600, now)
+    if not config.SEND_LIMIT_ENABLED:
+        # 设置里一键关掉了发言次数限制：不看每分钟 / 每小时条数（发送记录照记，重新打开立刻按真实数量算）
+        return True, ""
     per_min, per_hour = config.MAX_SEND_PER_MINUTE, config.MAX_SEND_PER_HOUR
-    if per_min > 0 and len(g) >= per_min:
-        return False, f"本群 1 分钟内已发 {len(g)} 条"
-    if per_hour > 0 and len(_all_sent) >= per_hour:
-        return False, f"1 小时内已发 {len(_all_sent)} 条"
+    last_min = sum(1 for t in g if now - t <= 60)
+    if per_min > 0 and last_min >= per_min:
+        return False, f"本群 1 分钟内已发 {last_min} 条"
+    if per_hour > 0 and len(g) >= per_hour:
+        return False, f"本群 1 小时内已发 {len(g)} 条"
     return True, ""
+
+
+def at_limit(group_id) -> str:
+    """发送已到上限（每分钟 / 每小时 / 熔断）时返回原因，否则返回空串。
+    要发消息的流程在调用模型前先问一句：反正发不出去，就别白花模型的钱。"""
+    ok, why = allow_send(group_id)
+    return "" if ok else why
+
+
+def skip_if_limited(group_id, tag: str = "AI聊天") -> bool:
+    """到上限就记一行日志并返回 True（调用方直接放弃这次生成）。"""
+    why = at_limit(group_id)
+    if why:
+        logger.info(f"[{tag}] 群{group_id} 发送已到上限（{why}），这次不调用模型")
+        return True
+    return False
 
 
 def _sent_ok(group_id) -> None:
     now = time.time()
     _group_sent[int(group_id or 0)].append(now)
-    _all_sent.append(now)
     _breaker["fails"] = 0
 
 
@@ -132,10 +144,64 @@ def _note_unsent(group_id, message, why: str) -> None:
         logger.debug(f"[AI聊天] 记录发送失败出错: {e!r}")
 
 
+def prepare_message(message):
+    """人格聊天发送前的最后一道标点闸门，仅处理顶层文字，不改媒体、引用或转发原文。"""
+    if not config.NO_PERIOD:
+        return message
+    from nonebot.adapters.onebot.v11 import Message, MessageSegment
+    from .cleanup import drop_periods
+
+    def clean_text(value):
+        if not value or not value.strip():
+            return value
+        leading = value[:len(value) - len(value.lstrip())]
+        trailing = value[len(value.rstrip()):]
+        body = drop_periods(value)
+        return leading + body + trailing if body else ""
+
+    if isinstance(message, str):
+        return clean_text(message)
+    if isinstance(message, MessageSegment):
+        if message.type != "text":
+            return message
+        return MessageSegment("text", {**message.data, "text": clean_text(str(message.data.get("text") or ""))})
+    if isinstance(message, Message):
+        out, run = [], []
+        def flush():
+            if run:
+                value = clean_text("".join(str(seg.data.get("text") or "") for seg in run))
+                if value:
+                    out.append(MessageSegment("text", {**run[0].data, "text": value}))
+                run.clear()
+        for seg in message:
+            if seg.type == "text":
+                run.append(seg)
+            else:
+                flush()
+                out.append(seg)
+        flush()
+        return Message(out)
+    return message
+
+
+def _empty_message(message):
+    if isinstance(message, str):
+        return not message.strip()
+    if getattr(message, "type", "") == "text":
+        return not str(message.data.get("text") or "").strip()
+    try:
+        return len(message) == 0
+    except TypeError:
+        return False
+
+
 def guarded(sender, group_id):
     """包装发送函数：超限/熔断时不发并返回 None；发送异常只记日志，不再往上抛。
     没发出去的文字会记账，让她知道「刚才那句群里没人看到」。"""
     async def _send(message):
+        message = prepare_message(message)
+        if _empty_message(message):
+            return None  # 只剩句号时不向QQ发送空消息，也不计为发送失败
         ok, why = allow_send(group_id)
         if not ok:
             logger.warning(f"[AI聊天] 群{group_id} 跳过发送：{why}")
@@ -156,10 +222,10 @@ def guarded(sender, group_id):
 def breaker_status() -> dict:
     now = time.time()
     return {"open": now < _breaker["open_until"], "seconds_left": max(0, int(_breaker["open_until"] - now)),
-            "fails": _breaker["fails"], "sent_last_hour": len(_all_sent)}
+            "fails": _breaker["fails"],
+            "sent_last_hour": {gid: sum(1 for t in dq if now - t <= 3600) for gid, dq in _group_sent.items() if dq}}
 
 
 def reset() -> None:
     _group_sent.clear()
-    _all_sent.clear()
     _breaker.update(fails=0, open_until=0.0)

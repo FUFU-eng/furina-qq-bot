@@ -15,8 +15,8 @@ from nonebot.adapters.onebot.v11 import (
 )
 
 from . import bot_dialog, config, context, digest, emotion, favor, learning, life_events, llm, memory, presence, reactions, transcript, turns
-from . import attention, boundary, people
-from ...core import permissions, roles, usage as daily_limits
+from . import attention, boundary, humanize, kernel, people, stickerlib
+from ...core import brain, permissions, roles, usage as daily_limits
 from ...services import slang
 from .chat import _collect_message_images, _handle_memory_intent, _reply, _schedule_image_desc
 from .cleanup import _desc_allowed
@@ -136,7 +136,7 @@ async def handle_summary(event: GroupMessageEvent, matcher) -> None:
         await matcher.finish("❌ 总结失败了，请稍后再试~")
         return
 
-    summary_text = (summary_text or "").strip()
+    summary_text = humanize.prepare_message((summary_text or "").strip())
     if not summary_text:
         await matcher.finish(roles.flavor("嗯...芙芙看了半天，感觉没什么特别的事发生呢~", "嗯...{name}看了半天，感觉没什么特别的事发生呢~"))
         return
@@ -315,6 +315,31 @@ def random_reply_chance(group_id, user_id, nickname: str, text: str, hist: list,
     return p, why
 
 
+async def _sim2_pre_at(event, group_id, user_id, nickname, raw, current_text, has_at_bot) -> bool:
+    """二代仿真被艾特：词条增删查 / 指令照旧先处理（处理了返回 True），再记情绪和好感。"""
+    if kernel.away_info(getattr(event, "self_id", "")) and not kernel._is_owner(user_id):
+        return False  # 她去刷 B 站了：词条 / 指令也等她回来再说（消息交给二代仿真攒着）
+    try:
+        done = await _handle_memory_intent(event, group_id, user_id, nickname, current_text, has_at_bot, raw)
+        if done:
+            # 词条是旁路直接办的：也告诉二代仿真（不叫醒她），免得下次被问起她完全不知道自己刚做了什么
+            kernel.note_handled(event, group_id, user_id, nickname, current_text, done if isinstance(done, str) else "")
+            return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[AI聊天] 记忆意图处理失败: {e}")
+    cmd = _parse_command(current_text, raw)
+    if cmd and await _execute_command(event, group_id, cmd):
+        kernel.note_handled(event, group_id, user_id, nickname, current_text, "", done_what="按这条消息里的指令办了")
+        return True
+    try:
+        emotion.observe_message(group_id, user_id, nickname, current_text, has_at_bot)
+        favor.observe_message(group_id, user_id, nickname, current_text, has_at_bot,
+                              message_id=getattr(event, "message_id", None), bot_qq=event.self_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[AI聊天] 情绪/好感更新失败: {e}")
+    return False
+
+
 async def handle_chat(event: GroupMessageEvent, matcher) -> None:
     bind_bot(event)  # 多号同时在线：本次处理期间的角色/自称/“艾特我”都按收到消息的这个号
     group_id = event.group_id
@@ -338,6 +363,18 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
             current_text = current_text.replace("[语音]", f"[语音] {heard}", 1)
             if not has_at_bot and any(a and a in heard for a in roles.aliases()):
                 has_at_bot = True
+
+    # 群友直接发的合并转发 / 聊天记录：展开成「谁: 说了什么」，不然她只看到一条空消息
+    if "[合并转发]" in current_text:
+        try:
+            from .quotes import forward_text
+
+            expanded = await forward_text(event.message, bot_for(event))
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[AI聊天] 展开合并转发失败: {e}")
+            expanded = ""
+        if expanded:
+            current_text = current_text.replace("[合并转发]", expanded, 1)
 
     # Reserve upstream-configured namespaces so AI does not answer game commands.
     # No local game parser, query, or rendering code is loaded here.
@@ -439,11 +476,34 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
             logger.info(f"[AI聊天] 群{group_id} {nickname}（{user_id}）还在冷落中（剩 {boundary.cold_left_hours(user_id):.1f} 小时），不回")
         return
 
+    # ===== 模式（面板「模式与内核」）：二代仿真交给 DSH 内核；聊天 / Agent 只回艾特 =====
+    if has_image:
+        stickerlib.note_images(group_id, event.message, meta.get("mid"), user_id, nickname)
+    mode = kernel.effective_mode(group_id)
+    _is_search = bool(_SEARCH_PATTERN.search(raw)) or "搜图" in raw
+    _is_upscale = "强化" in raw or "放大" in raw or "高清化" in raw
+    _handoff = has_at_bot and quote is not None and (quote.images or quote.failed) and (_is_search or _is_upscale)
+    if mode == "agent" and has_at_bot and not _handoff and brain.agent_enabled() \
+            and str(user_id) == str(config.GROUP_OWNER_QQ or "") and permissions.allowed(group_id, "chat", True):
+        await kernel.run_agent(bot_for(event), user_id, current_text, group_id=group_id)
+        return
+    if mode == "sim2" and not _handoff:
+        if has_at_bot:
+            if memory.replied_text(group_id, meta.get("mid")) is not None:
+                return
+            if permissions.allowed(group_id, "chat", True) and await _sim2_pre_at(
+                    event, group_id, user_id, nickname, raw, current_text, has_at_bot):
+                return
+        async def _fallback(ev=event, gid=group_id, uid=user_id, nick=nickname, st=store, txt=current_text,
+                            img=has_image, q=quote, vi=vision_images):
+            await _reply(ev, gid, nick, st, txt, img, q, forced=True, vision_images=vi)
+        if await kernel.observe(event, group_id, user_id, nickname, current_text, has_at_bot, has_image, _from_bot,
+                                fallback=_fallback):
+            return
+
     # ===== 艾特了机器人 =====
     if has_at_bot:
-        _is_search = bool(_SEARCH_PATTERN.search(raw)) or "搜图" in raw
-        _is_upscale = "强化" in raw or "放大" in raw or "高清化" in raw
-        if quote is not None and (quote.images or quote.failed) and (_is_search or _is_upscale):
+        if _handoff:
             # 引用里可点开的图（或读取失败）+ 输入了搜图/强化相关词 → 不聊天，交给搜图/图片强化插件
             _trigger_type = "搜图" if _is_search else "强化"
             logger.info(f"[AI聊天] 群{group_id} 引用有图+艾特+{_trigger_type}（自然语言意图），不触发聊天，交给对应插件")
@@ -491,6 +551,9 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
             logger.info(f"[AI聊天] 群{group_id} {nickname} 补充了一句，并入正在进行的回复")
             return
     # ===== 未艾特：智能场景判断 + 按概率随机接话（融合 Qhunliv13/qq-bot 与 MaiBot 实践） =====
+    # 聊天 / Agent 模式只回艾特；随机接话、顺手贴表情只在一代仿真里有
+    if mode != "sim1":
+        return
     if not permissions.allowed(group_id, "auto", True):
         return
     # 顺手给群消息贴个表情（低概率、每群有冷却）；贴了就不再插话
@@ -648,13 +711,15 @@ WELCOME_STYLES_GENERIC = [
 
 WELCOME_PROMPT = """【有新人进群了】{name} 刚加进这个群。你在群里看到了，想随口跟 TA 打个招呼。
 {group}
-像群里的老群友那样说一句就行：可以调侃一下 TA 的昵称、问一句 TA 从哪来的、或者随口提一句群里最近在聊什么；
+像群里的老群友那样说一句就行，可以调皮一点：坏笑着调侃 TA 的昵称、给个俏皮的下马威、开个小玩笑，或者问一句 TA 从哪来的；
 别用「欢迎加入大家庭」「有问题尽管问」这种客服腔，别做自我介绍式的长段；
 只写一行、不超过二十个字；不要写 TA 的名字（会自动艾特 TA），不要用括号写动作，不要输出任何 [标记]。"""
 
 
 async def _compose_welcome(group_id, name: str) -> str:
     """用她自己的话欢迎新人（每次都不一样）；生成不了就退回固定那几句。"""
+    if humanize.skip_if_limited(group_id, "入群欢迎"):
+        return ""
     try:
         from . import proactive
         from .cleanup import drop_periods
@@ -684,6 +749,7 @@ async def handle_group_increase(event: GroupIncreaseNoticeEvent):
     if str(event.user_id) == config.BOT_QQ:
         return
     if not config.WELCOME_NEW_MEMBER:
+        _note_join(event, group_id, "", "")
         return
     bot = None
     try:
@@ -696,6 +762,7 @@ async def handle_group_increase(event: GroupIncreaseNoticeEvent):
         logger.warning(f"[AI聊天] 群{group_id} 获取新成员信息失败，用默认称呼: {e}")
         name = "新朋友"
     if bot is None:
+        _note_join(event, group_id, "", "")
         return
     text = await _compose_welcome(group_id, name)
     if not text:
@@ -708,8 +775,21 @@ async def handle_group_increase(event: GroupIncreaseNoticeEvent):
         MessageSegment.text(f" {text}"),
     ])
     try:
-        await bot.send_group_msg(group_id=group_id, message=msg)
+        await bot.send_group_msg(group_id=group_id, message=humanize.prepare_message(msg))
         logger.info(f"[AI聊天] 群{group_id} 新成员{name}（{event.user_id}）入群，已欢迎")
+        memory.add_message(int(group_id), "assistant", text)
     except Exception as e:
         logger.warning(f"[AI聊天] 群{group_id} 欢迎新成员失败: {e}")
+        text = ""
+    _note_join(event, group_id, "" if name == "新朋友" else name, text)
+
+
+def _note_join(event, group_id, name: str, welcomed: str) -> None:
+    """告诉二代仿真有人进群了（以及已经替她欢迎过、说了什么），免得她再欢迎一遍或者找不到人。"""
+    try:
+        from . import kernel
+
+        kernel.note_join(getattr(event, "self_id", ""), group_id, event.user_id, name, welcomed)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[二代仿真] 记录入群失败: {e}")
 

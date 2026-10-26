@@ -19,7 +19,7 @@ from nonebot import get_driver, logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import boundary, config, dice, humanize, llm, memory
-from ...core import db, live_groups, permissions, scheduler, usage as daily_limits
+from ...core import brain, db, live_groups, permissions, scheduler, usage as daily_limits
 from ...core.botref import bind as bind_bot
 
 NS = "presence"
@@ -238,6 +238,8 @@ MISS_PROMPT = """【你突然想起一个人】{name} 已经{ago}没在群里说
 
 async def compose_miss(gid: str, self_id: str, uid: str, gap: float) -> str:
     from . import proactive  # 延迟导入：共用人设拼装
+    if humanize.skip_if_limited(gid, "惦记"):
+        return ""
 
     rec = _load(gid).get(uid) or {}
     name = rec.get("name") or "TA"
@@ -312,6 +314,8 @@ async def miss_tick(now: float | None = None, rng: random.Random | None = None) 
         return
     bind_bot(self_id=sid)
     for gid in sorted(groups):
+        if not brain.proactive_allowed(gid):  # 聊天 / Agent 模式不主动惦记人
+            continue
         due = _next_check.get(gid)
         if due is None:  # 刚启动：先等一会儿再想人，别一上线就挨个艾特
             _next_check[gid] = ts + r.uniform(20, 60) * 60

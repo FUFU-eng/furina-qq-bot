@@ -335,6 +335,14 @@ async def _panel_requests() -> None:
             return
         _bg.add(t := asyncio.create_task(_run_life_round()))
         t.add_done_callback(_bg.discard)
+    elif action == "surf_told":
+        # 群里主人叫她去刷 B 站、她答应了（二代仿真的 go_bili）：不看时段 / 轮数 / 间隔，只要登录着、没被暂停就刷
+        if not store.logged_in() or store.halted()[0] or _busy.locked():
+            logger.info("[B站] 叫她去刷，但现在刷不了（没登录 / 暂停中 / 正在刷）")
+            return
+        store.log_activity("群里叫我去刷 B 站，那就去", "info")
+        _bg.add(t := asyncio.create_task(_run_life_round()))
+        t.add_done_callback(_bg.discard)
     elif action in ("surf", "dynamic", "replies"):
         if not store.logged_in():
             store.log_activity("还没登录，刷不了", "error")

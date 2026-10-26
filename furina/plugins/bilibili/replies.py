@@ -201,6 +201,8 @@ async def _partner(cli: Client, c: dict) -> tuple[str, str]:
     mid = c["partner_mid"]
     if name and not mid:
         mid = await surf._mention_mid(cli, name)
+    elif mid and not name:  # 只填了 UID：按 UID 查昵称
+        name = await surf._partner_name(cli, mid)
     return name, mid
 
 

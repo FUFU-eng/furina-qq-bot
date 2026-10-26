@@ -535,7 +535,8 @@ class LoginHelper(QDialog):
         text = ("只重启机器人用的 NapCat（QQ）进程：\n"
                 "· 不会关闭你自己开的 QQ\n"
                 "· 不会停止 NoneBot（机器人服务）\n\n"
-                f"重启后这个窗口会出现新的二维码，请用 {self.account_text} 扫码。\n\n继续吗？")
+                "会先试一次免扫码登录（约 1 分钟）；登上了就不用扫码。\n"
+                f"没登上，这个窗口会出现新的二维码，请用 {self.account_text} 扫码。\n\n继续吗？")
         if not _ask(self, "重启 NapCat", text):
             return
         restart = getattr(self.panel, "restart_napcat_for_login", None)

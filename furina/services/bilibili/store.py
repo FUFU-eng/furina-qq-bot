@@ -173,7 +173,7 @@ def activity(limit: int = 40) -> list[dict]:
 
 
 # ---------------- 面板请求 ----------------
-REQUEST_ACTIONS = ("surf", "dynamic", "replies", "pause", "resume", "logout", "trending")
+REQUEST_ACTIONS = ("surf", "dynamic", "replies", "pause", "resume", "logout", "trending", "surf_life", "surf_told")
 
 
 def put_request(action: str, **extra) -> dict:

@@ -95,6 +95,11 @@ def due(now: float, rng: random.Random | None = None) -> str:
     if not nxt:
         last = float(st.get("last") or 0)
         nxt = last + max(0.5, config.OWN_LIFE_HOURS) * 3600 if last else now
+    from . import dice
+
+    pf = dice.peak_factor(now)
+    if pf < 1 and st.get("last"):  # DeepSeek 峰时（工作日 9-12、14-18 点，价格翻倍）：不急的事往后放，间隔拉长
+        nxt += max(0.5, config.OWN_LIFE_HOURS) * 3600 * (1 / max(pf, 0.2) - 1)
     return "normal" if now >= nxt else ""
 
 

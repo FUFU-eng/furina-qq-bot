@@ -12,8 +12,8 @@ import threading
 import time
 
 from furina.core import db
-from furina.services import slang
-from furina.services.bilibili import store
+from furina.services import annoy, slang
+from furina.services.bilibili import store, taste
 from furina.services.bilibili.client import Client
 
 from . import envfile
@@ -77,8 +77,53 @@ def overview() -> dict:
         "group_memes": _group_memes(),
         "pending": req,
         "login": {k: _login.get(k) for k in ("state", "ts")} if _login else None,
+        "taste": _safe(taste.snapshot, {}),
+        "inner": inner_state(),
+        "livestream": _safe(lambda: livestream(env), {}),
         "now": time.time(),
     }
+
+
+def livestream(env: dict | None = None) -> dict:
+    """她当主播的状态（机器人写在 bililive/state 里）+ 直播姬要加的舞台地址。"""
+    env = envfile.values() if env is None else env
+    st = db.get("bililive", "state") or {}
+    port = str(env.get("PORT") or "8080").strip()
+    fresh = time.time() - float(st.get("ts") or 0) < 120
+    return {"enabled": str(env.get("BILI_LIVE_ENABLED", "false")).lower() in ("1", "true", "yes", "on"),
+            "stage_url": f"http://127.0.0.1:{port}/live/stage", "live": bool(st.get("live")) and fresh,
+            "room": st.get("room") or "", "muted": bool(st.get("muted")), "stats": st.get("stats") or {},
+            "last_line": st.get("last_line") or "", "stage_clients": int(st.get("stage_clients") or 0),
+            "error": st.get("error") or ""}
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:  # noqa: BLE001  面板只读，坏了也不影响别的
+        return default
+
+
+_MOOD_DIMS = (("happy", "开心"), ("calm", "踏实"), ("sweet", "甜蜜"), ("heartache", "心疼"),
+              ("worry", "担心"), ("sad", "难过"), ("jealous", "吃醋"))
+
+
+def _mood_label(v: int) -> str:
+    return "欢喜" if v >= 80 else "开心" if v >= 62 else "一般" if v >= 42 else "有点闷" if v >= 25 else "难过"
+
+
+def inner_state() -> dict:
+    """她此刻：心情（读 emotion/state，只读）+ 烦躁值（annoy）。"""
+    mood = _safe(lambda: db.get("emotion", "state") or {}, {})
+    try:
+        mv = int(mood.get("mood", 70))
+    except (TypeError, ValueError):
+        mv = 70
+    dims = mood.get("dims") or {}
+    strong = sorted(((n, float(dims.get(k) or 0)) for k, n in _MOOD_DIMS), key=lambda x: -x[1])
+    return {"mood": mv, "mood_label": _mood_label(mv), "mood_reason": str(mood.get("reason") or "")[:60],
+            "feelings": [f"{n} {v:.0f}" for n, v in strong if v >= 10][:3],
+            "annoy": _safe(annoy.snapshot, {"enabled": False, "global": 0, "users": [], "events": []})}
 
 
 def request(action: str, keyword: str = "") -> dict:

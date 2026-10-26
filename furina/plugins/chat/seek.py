@@ -20,7 +20,7 @@ from nonebot import get_driver, logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import config, dice, diary, emotion, humanize, llm, memory, ownlife, people
-from ...core import db, live_groups, permissions, scheduler, usage as daily_limits
+from ...core import brain, db, live_groups, permissions, scheduler, usage as daily_limits
 from ...core.botref import bind as bind_bot
 
 NS = "seek"
@@ -64,7 +64,8 @@ def _groups() -> set[str]:
     live = live_groups.cached()
     if live:
         groups &= {str(g) for g in live}
-    return groups
+    # 模式（面板「模式与内核」）：聊天 / Agent 不主动找人；二代仿真看「二代也主动冒泡」
+    return {g for g in groups if brain.proactive_allowed(g)}
 
 
 def _she_spoke_within(gid: str, seconds: float, now: float) -> bool:
@@ -91,6 +92,8 @@ async def _send(bot, gid: str, uid: str, text: str) -> bool:
 async def _compose(gid: str, self_id: str, prompt: str, temperature: float, max_lines: int) -> str:
     from . import proactive
     from .cleanup import drop_periods
+    if humanize.skip_if_limited(gid, "主动找人"):
+        return ""
     try:
         raw = await llm.chat([{"role": "system", "content": proactive.base_system(gid, self_id)},
                               {"role": "user", "content": prompt}], temperature=temperature)

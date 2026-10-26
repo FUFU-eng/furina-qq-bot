@@ -81,6 +81,7 @@ class RolePageMixin:
         self.roles_data = []
         self.role_current = -1
         self._roles_deleted = set()
+        self._roles_dirty = set()
         self._role_refresh_list()
         return page
 
@@ -124,6 +125,7 @@ class RolePageMixin:
         if self.role_current < 0 or self.role_current >= len(self.roles_data):
             return
         r = self.roles_data[self.role_current]
+        self._roles_dirty.add(str(r.get("id", "")))
         r["name"] = self.role_name_edit.text().strip()
         r["prompt"] = self.role_prompt_edit.toPlainText()
         _al = self.role_alias_edit.text().strip()
@@ -228,6 +230,7 @@ class RolePageMixin:
         if alias_edit.text().strip():
             new_role["aliases"] = alias_edit.text().strip()
         self.roles_data.append(new_role)
+        self._roles_dirty.add(rid)
         # _role_refresh_list 会从磁盘重新读取；先保存，避免新角色刚加入内存就被刷新丢掉。
         if not self._role_save():
             return
@@ -273,19 +276,31 @@ class RolePageMixin:
 
     def _role_save(self):
         try:
-            # 面板开着期间，别处（网页面板、脚本）新加的角色不在这份内存列表里；
-            # 保存前把它们并回来，免得整表覆盖把别人刚加的角色冲掉（本窗口删掉的除外）。
-            known = {str(r.get("id", "")) for r in self.roles_data}
+            # 面板开着期间，别处（网页面板、脚本、机器人）可能改过角色；这份内存列表是打开面板时读的。
+            # 保存时只写本窗口真正改过的角色，其余一律以库里最新的为准，免得整表覆盖把别人的修改冲掉。
+            dirty = getattr(self, "_roles_dirty", set())
             deleted = getattr(self, "_roles_deleted", set())
-            for r in self._load_roles():
+            disk = {str(r.get("id", "")): r for r in self._load_roles() if r.get("id")}
+            merged, known = [], set()
+            for r in self.roles_data:
                 rid = str(r.get("id", ""))
-                if rid and rid not in known and rid not in deleted:
-                    self.roles_data.append(r)
-                    known.add(rid)
+                if rid in deleted:
+                    continue
+                merged.append(r if (rid in dirty or rid not in disk) else disk[rid])
+                known.add(rid)
+            for rid, r in disk.items():
+                if rid not in known and rid not in deleted:
+                    merged.append(r)
                     _it = QListWidgetItem(r.get("name", rid))
                     _it.setData(256, rid)
                     self.role_list.addItem(_it)
+            self.roles_data = merged
             _v2.write_doc(self._roles_path(), {"roles": self.roles_data})
+            dirty.clear()
+            # 当前选中的角色如果换成了库里的新版本，编辑框也跟着刷新
+            cur = self.role_current
+            if 0 <= cur < len(self.roles_data) and self.role_prompt_edit.toPlainText() != (self.roles_data[cur].get("prompt") or ""):
+                self._role_select(cur)
             self.add_log("success", "[角色管理] 角色已保存，机器人热读取")
             return True
         except Exception as e:

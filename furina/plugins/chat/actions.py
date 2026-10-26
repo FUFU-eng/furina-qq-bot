@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from nonebot import logger
 from nonebot.adapters.onebot.v11 import MessageSegment
 
-from . import learning
+from . import humanize, learning
 from .commands import _match_member, send_eagle_images
 from ...core.botref import bot_for
 
@@ -110,7 +110,7 @@ async def execute(act: ReplyActions, event, group_id, sender) -> None:
             target_user_id = _match_member(members, act.at_target)
             if target_user_id:
                 at_msg = MessageSegment.at(target_user_id) + MessageSegment.text(f" {act.at_content}" if act.at_content else "")
-                await bot.send_group_msg(group_id=group_id, message=at_msg)
+                await bot.send_group_msg(group_id=group_id, message=humanize.prepare_message(at_msg))
                 logger.info(f"[AI聊天] 群{group_id} AI艾特成功，目标={act.at_target}({target_user_id})")
             else:
                 logger.info(f"[AI聊天] 群{group_id} AI艾特失败，未找到目标={act.at_target}")

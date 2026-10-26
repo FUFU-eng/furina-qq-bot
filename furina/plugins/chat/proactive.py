@@ -20,7 +20,7 @@ from nonebot.adapters.onebot.v11 import MessageSegment
 
 from . import actions, cleanup, config, dice, emotion, huoren, learning, humanize, llm, memory, voice
 from .cleanup import _scrub_fixed_template, _strip_action_parentheses, _strip_context_markers, _too_similar, _trim_reply
-from ...core import db, live_groups, permissions, scheduler, usage as daily_limits
+from ...core import brain, db, live_groups, permissions, scheduler, usage as daily_limits
 from ...core.botref import bind as bind_bot
 
 FEATURE = "proactive"
@@ -121,10 +121,11 @@ def _clean_line(text: str) -> str:
     text = re.sub(r"\[[A-Z_]+(?::[^\]\n]*)?\]?", "", text).strip()  # 没写完整的 [AT:… / [VOICE 之类
     if cleanup._JUNK_LINE.fullmatch(text or " "):
         return ""  # 只剩「[」「]」这种残渣
-    text = text.strip().rstrip("。")
+    text = text.strip()
     text = re.sub(r"[~～]+$", "", text).strip()
     cap = config.AI_CHAT_MAX_REPLY_CHARS
-    return _trim_reply(text, min(60, cap) if cap > 0 else 60)
+    text = _trim_reply(text, min(60, cap) if cap > 0 else 60)
+    return cleanup.drop_periods(text) if config.NO_PERIOD else text
 
 
 def _clean(text: str, max_lines: int = 1) -> str:
@@ -153,6 +154,8 @@ def base_system(gid: str, self_id: str, query: str | None = None) -> str:
 
 async def compose(gid: str, self_id: str, history: list, idle_text: str) -> str:
     """生成一两句开话题的话（一行一条）；失败或不合适返回空串。"""
+    if humanize.skip_if_limited(gid, "冷场开话题"):
+        return ""
     system = base_system(gid, self_id, query=_transcript(history, 8))
     recent_self = memory.recent_assistant_messages(int(gid), 6)
     habit = voice.habit_note(recent_self)
@@ -225,6 +228,8 @@ async def tick(now: float | None = None) -> None:
     bind_bot(self_id=sid)
     ts = time.time() if now is None else now
     for gid in sorted(groups):
+        if not brain.proactive_allowed(gid):  # 聊天 / Agent 模式不主动冒泡
+            continue
         try:
             gid_int = int(gid)
         except (TypeError, ValueError):

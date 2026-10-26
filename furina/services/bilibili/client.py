@@ -207,6 +207,7 @@ class Client:
                              "order": random.choice(["totalrank", "pubdate", "click"])}, wbi=True)
         return [{"bvid": v["bvid"], "title": strip_html(v.get("title", "")), "up": v.get("author", ""),
                  "duration": parse_duration(v.get("duration")), "source": f"搜索「{keyword}」",
+                 "tags": strip_html(str(v.get("tag") or "")),
                  "pic": ("https:" + v["pic"]) if str(v.get("pic", "")).startswith("//") else v.get("pic", "")}
                 for v in d.get("result") or [] if v.get("bvid")]
 
@@ -371,6 +372,23 @@ class Client:
             if strip_html(u.get("uname", "")) == name:
                 return str(u.get("mid") or "")
         return ""
+
+    async def user_card(self, mid: str | int) -> dict:
+        """按 UID 看一个人：{"mid", "name", "following"（她是否已关注）}；查不到给空 dict。"""
+        try:
+            d = await self._get(API + "/x/web-interface/card", {"mid": int(mid)})
+        except (RiskControl, NotLoggedIn):
+            raise
+        except (BiliError, ValueError):
+            return {}
+        card = d.get("card") or {}
+        if not card.get("name"):
+            return {}
+        return {"mid": str(card.get("mid") or mid), "name": str(card["name"]), "following": bool(d.get("following"))}
+
+    async def follow(self, mid: str | int) -> None:
+        """关注一个人（act=1）。"""
+        await self._post(API + "/x/relation/modify", {"fid": int(mid), "act": 1, "re_src": 11, "csrf": self.csrf})
 
     async def post_dynamic(self, text: str) -> str:
         mid = self.cookies.get("DedeUserID", "0")

@@ -866,8 +866,8 @@ class PicsPageMixin:
                           "QLineEdit{background:#0b1222;color:#f4f7ff;border:1px solid #334155;border-radius:6px;padding:6px;}")
         lay = QVBoxLayout(dlg)
         need_pw = svc.require_password()
-        lay.addWidget(QLabel("在手机「芙宁娜筛图」App 里填这个地址（在外面也能用）：" if not need_pw
-                             else "在手机「芙宁娜筛图」App 里填这两项（在外面也能用）："))
+        lay.addWidget(QLabel("在手机「芙芙筛图」App 里填这个地址（在外面也能用）：" if not need_pw
+                             else "在手机「芙芙筛图」App 里填这两项（在外面也能用）："))
         url = QLineEdit(svc.public_url())
         url.setReadOnly(True)
         pw = QLineEdit(svc.token())
@@ -883,6 +883,14 @@ class PicsPageMixin:
         note.setWordWrap(True)
         note.setStyleSheet(f"color:{_MUTED};")
         lay.addWidget(note)
+        download = svc.public_url().rstrip("/") + "/app"
+        install = QLineEdit(download)
+        install.setReadOnly(True)
+        lay.addWidget(QLabel("安卓安装包（手机浏览器打开，允许安装即可）："))
+        install_row = QHBoxLayout()
+        install_row.addWidget(install, 1)
+        install_row.addWidget(self._tool_button("复制安装地址", lambda: QGuiApplication.clipboard().setText(download)))
+        lay.addLayout(install_row)
         btns = QHBoxLayout()
         btns.addStretch(1)
 

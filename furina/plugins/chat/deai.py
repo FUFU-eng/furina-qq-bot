@@ -14,6 +14,17 @@ SOFT = [
     re.compile(r"[，,。！!\s]*(?:有(?:任何|什么)?(?:问题|需要)(?:的话)?)?随时(?:告诉|找|问|联系)我[^。！!\n]*[。！!～~]*"),
     re.compile(r"[，,。！!\s]*(?:欢迎随时|随时欢迎)[^。！!\n]*[。！!～~]*$"),
 ]
+# 套路句式（数据来自 dsh-fish-tone 对 10 万条 B 站评论的统计：AI 是真人的 9~41 倍）。
+# 一处两处真人也说；同一轮里换着用两种以上，才是 AI 味的指纹。
+STRUCTURES = [
+    ("不是…而是…", re.compile(r"不是[^。！？!?\n]{1,20}[，,]?\s*而是")),
+    ("最…的是", re.compile(r"最[^。！？!?\n，,]{1,8}的是")),
+    ("先…再…", re.compile(r"先[^。！？!?\n]{1,12}[，,]?\s*再")),
+    ("不仅…更…", re.compile(r"不仅[^。！？!?\n]{1,20}(?:更|还|也)")),
+    ("三段并列", re.compile(r"[^、，,\s]{1,8}、[^、，,\s]{1,8}(?:、|和|与|以及)[^、，,\s]{1,8}")),
+]
+DASH = re.compile(r"\s*—{2,}\s*")
+
 CONNECTORS = re.compile(r"(?:^|(?<=[。！？!?\n，,]))\s*(?:总的来说|总而言之|综上所述|值得一提的是|需要注意的是|不得不说的是)[，,：:]?\s*")
 
 HARD = re.compile(
@@ -38,6 +49,7 @@ def soft_clean(text: str) -> str:
     for p in SOFT:
         out = p.sub("", out)
     out = CONNECTORS.sub("", out)
+    out = DASH.sub("，", out).strip("，")  # 聊天里没人打破折号
     out = re.sub(r"\n{3,}", "\n\n", out).strip()
     return out if len(out) >= 2 else text  # 删光了就别删
 
@@ -46,6 +58,12 @@ def hard_problem(text: str) -> str:
     """有硬毛病时返回命中的片段（给重试提示用），没有返回空串。"""
     m = HARD.search(text or "")
     return m.group(0).strip()[:20] if m else ""
+
+
+def structure_problem(text: str) -> str:
+    """同一轮里套路句式扎堆（≥2 种不同的）：返回命中的句式名，给重说提示用。"""
+    kinds = [name for name, rx in STRUCTURES if rx.search(text or "")]
+    return "套路句式扎堆：" + "、".join(kinds) if len(kinds) >= 2 else ""
 
 
 def strip_markdown(text: str) -> str:

@@ -28,7 +28,7 @@ HUOREN = [
     ("AI_CHAT_DEAI", "去 AI 味", "bool", True,
      "删掉「希望对你有帮助」「总的来说」这类客服腔；回复里出现自称 AI、markdown 加粗标题时让她重说一次。", {}),
     ("AI_CHAT_NO_PERIOD", "不打句号", "bool", True,
-     "真人在 QQ 里几乎不打句号：她回复的句末句号会删掉、句中的换成逗号；「。。。」这种表达无语的保留。", {}),
+     "发送前统一兜底，覆盖艾特聊天、主动说话、惦记和戳一戳：单个中文/英文句号在末尾删掉、句中换逗号；保留「。。。」、网址、小数、文件名和代码，不改真实转发原文。", {}),
     ("AI_CHAT_TALK_SHAPE", "说话手感（大肥鱼式）", "bool", True,
      "参考社区大肥鱼群友 bot：每次随机提醒一种「人味」小毛病（句中停顿、结巴、改口、随意标点、先蹦反应字），"
      "对方认真/难过时收起玩笑，被夸先端着、被拆穿先嘴硬；几个人复读时她也可能跟一句。约多 50 token。", {}),
@@ -76,6 +76,18 @@ HUOREN = [
     ("AI_CHAT_MSG_SOFT_MAX", "每条大约多长换一条", "int", 30,
      "像真人用手机聊天：一条消息一个意思。她每写一行就单独发一条；某一行超过这个长度，会在「！？…」或逗号处拆成几条（不会把半句话拆开，也不截断）。",
      _o(min=12, max=200, suffix="字")),
+    ("AI_CHAT_ANNOY", "会被找烦（烦躁值）", "bool", True,
+     "她心里有一根会攒着的烦躁值：同一个人连着艾特、同一句话反复问、说好要安静还被叫、说话难听都会涨；没人吵就慢慢消，"
+     "被哄（谢谢 / 抱抱 / 对不起 / 夸她）会降一截。烦的时候回得短、冲、敷衍；群里整体吵时随机插话也少一些。纯本地计算，不花 token。", {}),
+    ("AI_CHAT_ANNOY_IGNORE", "烦透了会不理人", "bool", True,
+     "对某人烦透了时，TA 的艾特有一定概率直接不理（不叫醒她，也就不花 token）。主人永远不会被不理。", {}),
+    ("AI_CHAT_ANNOY_HALF_MINUTES", "消气速度（多久淡一半）", "int", 60, "没人吵她时，烦躁值过这么久降一半。", _o(min=10, max=600, suffix="分钟")),
+    ("AI_CHAT_ANNOY_SENSITIVITY", "容易烦的程度", "dec", 1.0, "1 = 正常；调大更容易烦，调小更有耐心。", _o(min=0.2, max=3, decimals=1)),
+    ("AI_CHAT_BANNED_PATTERNS", "不许再出现的句式", "text", "",
+     "一行（或逗号）一个，用「…」表示中间随便几个字，比如「不愧是…」「笑死…了」。她用了会被要求重说，再用就直接删掉那半句。"
+     "「这…我服」（这优先级我服 / 这波我服了）已经内置禁掉，不用再填。", {}),
+    ("AI_CHAT_QUOTE_PROBABILITY", "回人时引用对方那条的概率", "pct", 0.15,
+     "真人回消息很少点「引用」，平时直接说或艾特就行；这里是偶尔引用一下的概率。对方那条已经被刷上去很远时照样会引用，免得看不出在回谁。", {}),
     ("AI_CHAT_BURST_MAX", "一次最多连发几条", "int", 0,
      "0 = 不限（平时提示词引导她大多一条、一般不超过两三条）。小鲸鱼教程建议 4（防风控），多出来的并进最后一条。", _o(min=0, max=20, suffix="条")),
     ("AI_CHAT_MAX_REPLY_CHARS", "整段回复总字数上限", "int", 0, "0 = 不限（推荐，靠一句一条控制每条长短）；填数字会把整段截短。",
@@ -249,7 +261,7 @@ BILI = [
      "刷到她特别喜欢、也想分享的视频时，真的发到群里的概率。各群在「功能权限 → B站刷到分享」开关（默认开）。", {}),
     ("BILI_SHARE_DAILY_MAX", "每群每天最多分享", "int", 2, "0 = 不限；同一个群两次分享至少隔 2 小时。", _o(min=0, max=50, suffix="次")),
     ("BILI_MENTION_NAME", "主人的 B 站昵称", "text", "",
-     "填你的 B 站昵称。在 B 站上她把你当主人（只限 B 站，QQ 里不变）：刷到你一定喜欢的视频会在评论里艾特你，"
+     "填你的 B 站昵称（只填下面的 UID 也行）。在 B 站上她把你当主人（只限 B 站，QQ 里不变）：想艾特你时会在评论里艾特你，说什么看她心情，"
      "有人回她时也可能艾特你「主人快来」。留空 = 不艾特。", {}),
     ("BILI_PARTNER_MID", "主人的 B 站 UID（可选）", "text", "",
      "填了就按 UID 认人，比按昵称搜更准；你本人在评论区回她时，她能认出是主人。", {}),
@@ -268,8 +280,46 @@ BILI = [
      _o(min=1, max=720, suffix="小时", decimals=0)),
     ("BILI_INTERESTS", "她喜欢搜的关键词", "text", "原神,芙宁娜,枫丹,音乐剧,歌剧,甜点,蛋糕,猫猫,搞笑,鬼畜,舞台剧,探店",
      "逗号分隔；刷视频时有时会搜这些。", {}),
+    ("BILI_ROAM_TAGS", "常去逛的标签", "text", "大肥鱼",
+     "逗号分隔；刷视频时按下面的概率专门去逛带这些标签（或标题里有这个词）的视频。留空 = 不逛。", {}),
+    ("BILI_ROAM_PROBABILITY", "每轮去逛标签的概率", "pct", 0.3, "", {}),
+    ("BILI_HOMEWORK_ENABLED", "让主人总结视频（抖S）", "bool", True,
+     "倒反天罡：她也可以在评论区艾特主人，霸气地命令你总结视频、限时交作业（布不布置看她心情）。需要先填主人的昵称或 UID。", {}),
+    ("BILI_HOMEWORK_DAILY_MAX", "每天最多布置几次作业", "int", 0, "0 = 不限，看她心情。", _o(min=0, max=20, suffix="次")),
+    ("BILI_FOLLOW_ENABLED", "答应关注群友就真关注", "bool", True,
+     "群友在群里让她关注 TA 的 B 站、她答应时，用小号真去关注（要 TA 给 UID、主页链接或准确昵称）。", {}),
+    ("BILI_FOLLOW_DAILY_MAX", "每天最多关注几个人", "int", 0, "0 = 不限，看她心情。关注是 B 站风控最盯的动作，被风控时可以在这里限一下。",
+     _o(min=0, max=50, suffix="个")),
+    ("BILI_TASTE", "口味会变", "bool", True,
+     "每看完一个视频，按她打的分给这个 UP 主 / 分区 / 标签加减分：喜欢的越来越想看，无聊的越来越不想点；同一样东西看太多会腻；"
+     "特别喜欢或讨厌的会记成看法，以后群里聊到相关的她能想起来。纯本地计算，不花 token。", {}),
+    ("BILI_TASTE_PROBABILITY", "按口味去搜的比例", "pct", 0.25, "每轮刷 B 站时，有这么大比例按她最近迷上的东西去搜。", {}),
+    ("BILI_TASTE_HALF_DAYS", "口味淡得多快", "int", 10, "一样东西的喜欢 / 讨厌，过这么多天淡一半，口味就会慢慢漂移。", _o(min=1, max=90, suffix="天")),
+    ("BILI_AWAY_ENABLED", "叫她去刷B站就真去", "bool", True,
+     "群里主人叫她去刷 B 站、她答应了，就真用小号去刷一阵子；这段时间别人艾特她不回，回来后再按她的性格回（可能嫌你烦）。"
+     "主人艾特她会提前回来。", {}),
+    ("BILI_AWAY_MINUTES", "去刷多久", "int", 10, "这段时间里不看群。", _o(min=1, max=120, suffix="分钟")),
     ("BILI_RISK_PAUSE_HOURS", "触发风控后暂停", "dec", 24,
      "遇到 412 / -352 / 验证码时立刻停手这么久，并私聊通知主人。", _o(min=1, max=720, suffix="小时", decimals=0)),
+    ("BILI_LIVE_ENABLED", "她当主播", "bool", False,
+     "打开后：你在「直播姬」里点开始直播，她半分钟内上场，听弹幕、用 AI 声音和观众聊天；下播后私聊你一份小结。"
+     "直播姬里要先加一个「浏览器 / 网页」素材，地址见本页上方的舞台地址。关掉后几秒内停嘴。", {}),
+    ("BILI_LIVE_ROOM", "直播间号", "text", "", "留空 = 按「主人的 B 站 UID」自动找你的直播间。", {}),
+    ("BILI_LIVE_VOICE", "她的声音", "text", "zh-CN-XiaoyiNeural",
+     "微软免费 AI 女声（不用角色原声，避开侵权）。可填：zh-CN-XiaoyiNeural 活泼少女、zh-CN-XiaoxiaoNeural 温柔、"
+     "zh-CN-XiaohanNeural 知性、zh-TW-HsiaoChenNeural 台湾腔。", {}),
+    ("BILI_LIVE_RATE", "语速", "text", "+5%", "如 +10% 快一点、-10% 慢一点。", {}),
+    ("BILI_LIVE_PITCH", "音调", "text", "+6Hz", "如 +10Hz 更尖、-5Hz 更低。", {}),
+    ("BILI_LIVE_REPLY_GAP", "说完一段至少停多久", "int", 4, "停顿越长越省钱，也不显得话痨。", _o(min=2, max=60, suffix="秒")),
+    ("BILI_LIVE_IDLE_MINUTES", "没人说话多久后自己找话题", "int", 3, "0 = 没弹幕就一直安静。", _o(min=0, max=60, suffix="分钟")),
+    ("BILI_LIVE_THANK_GIFTS", "谢礼物", "bool", True, "有人送礼 / 上舰会谢（连击会合在一起谢一次）。", {}),
+    ("BILI_LIVE_WELCOME", "偶尔欢迎进房的人", "bool", True, "不会每个都欢迎，隔一会儿挑一个。", {}),
+    ("BILI_LIVE_NOTIFY", "私聊通知我", "bool", True, "开播、下播小结、有人带节奏、直播姬没加画面时私聊主人。", {}),
+    ("BILI_LIVE_LABEL", "画面上的 AI 标识", "text", "AI 虚拟主播 · 同人非官方",
+     "一直挂在画面左上角。平台要求 AI 内容要标明，别删光。", {}),
+    ("BILI_LIVE_AVATAR", "形象图", "text", "",
+     "电脑上一张图片的完整路径（最好是透明背景 PNG、自己画的或有授权的同人立绘）；留空 = 显示名字牌。不要用游戏官方立绘。", {}),
+    ("BILI_LIVE_BLOCK_WORDS", "额外屏蔽词", "text", "", "带这些词的弹幕不念、不显示，用 | 隔开，如 剧透|某某某。", {}),
 ]
 
 GROUPS = {
@@ -291,8 +341,9 @@ SECTIONS = {
     "huoren": [
         ("说话的味道", "热梗、口吻、去 AI 味、手感。", ("AI_CHAT_HUOREN_V3", "AI_CHAT_STYLE_LINES", "AI_CHAT_SLANG", "AI_CHAT_SLANG_PROBABILITY",
                                           "AI_CHAT_GROUP_MEMES", "AI_CHAT_TRENDING", "AI_CHAT_DEAI", "AI_CHAT_NO_PERIOD",
-                                          "AI_CHAT_TALK_SHAPE", "AI_CHAT_SELF_ACTS")),
-        ("一句一条（小鲸鱼式）", "不限总字数和条数，但每条都短。", ("AI_CHAT_MSG_SOFT_MAX", "AI_CHAT_BURST_MAX", "AI_CHAT_MAX_REPLY_CHARS")),
+                                          "AI_CHAT_TALK_SHAPE", "AI_CHAT_SELF_ACTS", "AI_CHAT_BANNED_PATTERNS")),
+        ("一句一条（小鲸鱼式）", "不限总字数和条数，但每条都短。", ("AI_CHAT_MSG_SOFT_MAX", "AI_CHAT_BURST_MAX", "AI_CHAT_MAX_REPLY_CHARS",
+                                                           "AI_CHAT_QUOTE_PROBABILITY")),
         ("随机接话会变高的时候", "平时按「设置 → AI 聊天 → 随机接话概率」；遇到下面这些情况提到这里的数（填 0 = 这种情况不加）。"
          "随机接话概率设成 0 时这些都不生效。「TA 有近况可问」在「设置 → AI 聊天 → 说话活人感」。", (
             "AI_CHAT_THREAD_PROBABILITY", "AI_CHAT_LINGER_PROBABILITY", "AI_CHAT_CHATTY_QUESTION_PROBABILITY",
@@ -310,6 +361,8 @@ SECTIONS = {
         ("边界感", "群主和特别关照的人除外；其他人最多抱抱。", ("AI_CHAT_BOUNDARY", "AI_CHAT_BOUNDARY_WARNS", "AI_CHAT_COLD_SHOULDER_HOURS", "AI_CHAT_FORGIVE")),
         ("鱼的记忆（按相关度想起）", "参考 dsh-fish-memory：会遗忘、会回暖、新的顶替旧的。", (
             "AI_CHAT_RECALL", "AI_CHAT_RECALL_MAX_ITEMS", "AI_CHAT_RECALL_MAX_CHARS", "AI_CHAT_MEMORY_HALF_LIFE_DAYS")),
+        ("烦躁值", "会被找烦、会消气、烦透了会不理人；面板「B站生活」页最上面能看到她此刻对谁有多烦。", (
+            "AI_CHAT_ANNOY", "AI_CHAT_ANNOY_IGNORE", "AI_CHAT_ANNOY_HALF_MINUTES", "AI_CHAT_ANNOY_SENSITIVITY")),
         ("鱼的心情", "参考 dsh-feiyu-mood：每轮判、慢慢回稳、四道闸。", (
             "AI_CHAT_MOOD_JUDGE", "AI_CHAT_MOOD_BASE", "AI_CHAT_MOOD_HALF_HOURS", "AI_CHAT_MOOD_CONFIDENCE",
             "AI_CHAT_MOOD_TELL_PER_DAY", "AI_CHAT_MOOD_JUDGE_DAILY_MAX")),
@@ -336,14 +389,23 @@ SECTIONS = {
     "bili": [
         ("刷视频", "没字幕（听不到内容）的视频优先换掉，实在要看也只点赞、不评论不发弹幕。", (
             "BILI_ENABLED", "BILI_DRY_RUN", "BILI_HOURS", "BILI_ROUNDS_DAILY", "BILI_ROUND_GAP_MINUTES",
-            "BILI_VIDEOS_PER_ROUND", "BILI_WATCH_REPORT", "BILI_MIN_VIEWS", "BILI_MIN_AGE_HOURS", "BILI_INTERESTS", "BILI_LEARN_SLANG")),
+            "BILI_VIDEOS_PER_ROUND", "BILI_WATCH_REPORT", "BILI_MIN_VIEWS", "BILI_MIN_AGE_HOURS", "BILI_INTERESTS", "BILI_ROAM_TAGS",
+            "BILI_ROAM_PROBABILITY", "BILI_LEARN_SLANG")),
         ("点赞 / 弹幕 / 评论 / 动态", "做不做由她自己决定；上限 0 = 不限。", (
             "BILI_LIKE_ENABLED", "BILI_DANMAKU_ENABLED", "BILI_COMMENT_ENABLED", "BILI_DYNAMIC_ENABLED", "BILI_LIKE_DAILY_MAX",
             "BILI_DANMAKU_DAILY_MAX", "BILI_COMMENT_DAILY_MAX", "BILI_DYNAMIC_DAILY_MAX", "BILI_DYNAMIC_GAP_HOURS", "BILI_DYNAMIC_HOURS")),
         ("评论区回复", "有人在她的评论底下回她时。", ("BILI_REPLY_ENABLED", "BILI_REPLY_DAILY_MAX", "BILI_REPLY_CHECK_MINUTES",
                                          "BILI_REPLY_HOURS", "BILI_REPLY_EMOTES", "BILI_REPLY_LIKE", "BILI_REPLY_MAX_AGE_HOURS")),
-        ("主人（只在 B 站）", "", ("BILI_MENTION_NAME", "BILI_PARTNER_MID", "BILI_MENTION_PROBABILITY", "BILI_AT_PARTNER")),
+        ("主人（只在 B 站）", "", ("BILI_MENTION_NAME", "BILI_PARTNER_MID", "BILI_MENTION_PROBABILITY", "BILI_AT_PARTNER",
+                                "BILI_HOMEWORK_ENABLED", "BILI_HOMEWORK_DAILY_MAX")),
+        ("答应关注群友", "群里有人让她关注 TA 的 B 站时。", ("BILI_FOLLOW_ENABLED", "BILI_FOLLOW_DAILY_MAX")),
+        ("叫她去刷B站", "群里叫她去刷 B 站时。", ("BILI_AWAY_ENABLED", "BILI_AWAY_MINUTES")),
+        ("口味会变", "看过的东西会改变她想看什么；本页能看到她最近在迷什么。", ("BILI_TASTE", "BILI_TASTE_PROBABILITY", "BILI_TASTE_HALF_DAYS")),
         ("分享到群 / 风控", "", ("BILI_SHARE_PROBABILITY", "BILI_SHARE_DAILY_MAX", "BILI_RISK_PAUSE_HOURS")),
+        ("直播（她当主播）", "你在直播姬开播，她就上场听弹幕聊天；QQ 私聊她「闭麦」「开麦」「直播状态」。", (
+            "BILI_LIVE_ENABLED", "BILI_LIVE_ROOM", "BILI_LIVE_VOICE", "BILI_LIVE_RATE", "BILI_LIVE_PITCH", "BILI_LIVE_REPLY_GAP",
+            "BILI_LIVE_IDLE_MINUTES", "BILI_LIVE_THANK_GIFTS", "BILI_LIVE_WELCOME", "BILI_LIVE_NOTIFY", "BILI_LIVE_LABEL",
+            "BILI_LIVE_AVATAR", "BILI_LIVE_BLOCK_WORDS")),
     ],
 }
 

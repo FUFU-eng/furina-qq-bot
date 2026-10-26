@@ -201,20 +201,18 @@ class Controller:
         return self._run("重启", work)
 
     def restart_napcat_for_login(self) -> bool:
-        """登录助手里的「重启 NapCat」：只重启机器人用的 NapCat/QQ，不带快速登录参数以直接出新二维码。"""
+        """登录助手里的「重启 NapCat」：只重启机器人用的 NapCat/QQ；先快速登录（免扫码），不行再出新二维码。"""
         qq = envfile.get("BOT_QQ", "")
 
         def work():
-            started = time.time()
+            from furina.services import napcat_recover
+
             self.emit("info", "[登录] 正在重启 NapCat（只重启机器人用的 QQ，你自己开的 QQ 不受影响）...")
-            napcat.stop()
-            napcat.start(None)
-            if self._wait_qrcode(started, 60):
-                self.emit("success", f"[登录] NapCat 已重启并生成新二维码，请用机器人账号 {qq} 扫码")
-            else:
-                self.emit("warn", "[登录] NapCat 已启动，但 60 秒内没有生成新二维码；可在 WebUI 点「重新获取二维码」")
+            result = napcat_recover.relogin(qq, reason="登录助手", on_event=lambda lv, msg: self.emit(lv, "[登录] " + msg))
             gen = self.generation
-            threading.Thread(target=self._monitor_login, args=(qq, gen, 600), daemon=True).start()
+            if result in ("quick_ok", "qr", "qr_missing"):
+                threading.Thread(target=self._monitor_login, args=(qq, gen, 30 if result == "quick_ok" else 600),
+                                 daemon=True).start()
         return self._run("重启 NapCat", work)
 
     def _wait_qrcode(self, since: float, timeout: float) -> bool:

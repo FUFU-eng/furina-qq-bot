@@ -9,6 +9,9 @@ os.environ["FURINA_ROOT"] = str(TMP)
 os.environ["FURINA_DB"] = str(TMP / "data" / "test.db")
 # 每轮判心情会额外调模型：老测试按关键词模式跑（会数模型调用次数），新测试里单独打开
 os.environ.setdefault("AI_CHAT_MOOD_JUDGE", "false")
+# 烦躁值 / B站口味会跨测试累积（同一个假用户被艾特很多次）：老测试关着跑，新测试里单独打开
+os.environ.setdefault("AI_CHAT_ANNOY", "false")
+os.environ.setdefault("BILI_TASTE", "false")
 # 筛图收件箱：测试里收到的图只落在临时目录，绝不写进真实的待筛目录 / Eagle 导入文件夹
 os.environ.setdefault("PIC_INBOX_DIR", str(TMP / "pic_inbox"))
 os.environ.setdefault("PIC_INBOX_EXPORT_DIR", str(TMP / "eagle_import"))

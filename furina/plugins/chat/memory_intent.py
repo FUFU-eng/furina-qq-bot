@@ -41,7 +41,14 @@ target 规则：
 value 规则：
 - add 时把要记住的内容单独提取出来，去掉“帮我记住”“给他加上”“设定是”这类引导语。
 - 内容里带明显疑问（是什么、怎么、哪些）时说明是 query，不是 add。
-- 内容不是设定而是闲聊时 action 返回 none。"""
+- 内容不是设定而是闲聊时 action 返回 none。
+
+结合最近的聊天：
+- 下面会附上群里最近几条聊天（「机器人」是你自己刚说过的话，包括刚才执行的「记住了…」「删掉啦…」回执）。
+- 原话指代不明时（「把设定去掉」「刚才那条删了」「别听他的，撤回」），按最近聊天判断指的是哪条：
+  例如机器人刚回过「记住了，张三的设定：xxx」，有人说「把设定去掉」，就是 delete，target=张三，value=xxx。
+- delete 时只说了要删的内容、没说是谁的（「删除xxx」），先从最近聊天里找这条内容属于谁填 target、内容填 value；
+  找不到时 target 填内容本身、value 留空。"""
 
 
 def _system_prompt() -> str:
@@ -87,7 +94,8 @@ def _clean_target(raw: str, nickname: str) -> str:
     return t
 
 
-async def detect_memory_action(gid, nickname: str, text: str, mentioned: list[str] | None = None) -> dict | None:
+async def detect_memory_action(gid, nickname: str, text: str, mentioned: list[str] | None = None,
+                               context: str = "") -> dict | None:
     """返回 {"action","target","value"}；普通聊天/识别失败返回 None。"""
     text = (text or "").strip()
     if not text:
@@ -96,7 +104,8 @@ async def detect_memory_action(gid, nickname: str, text: str, mentioned: list[st
         {"role": "system", "content": _system_prompt()},
         {
             "role": "user",
-            "content": f"当前说话人昵称：{nickname}\n本条消息里还艾特了这些人：{'、'.join(mentioned) if mentioned else '（无）'}\n对方艾特机器人说的原话：{text}\n请判断意图并只输出 JSON。",
+            "content": (f"群里最近的聊天（旧→新）：\n{context}\n\n" if context else "")
+            + f"当前说话人昵称：{nickname}\n本条消息里还艾特了这些人：{'、'.join(mentioned) if mentioned else '（无）'}\n对方艾特机器人说的原话：{text}\n请判断意图并只输出 JSON。",
         },
     ]
     try:

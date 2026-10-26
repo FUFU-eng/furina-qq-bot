@@ -21,12 +21,13 @@ from datetime import date
 import httpx
 from nonebot import logger
 
-from . import db, env
+from . import db, env, free_model
 
 DEFAULT_MODEL = "deepseek-flash"
 
 _semaphore = asyncio.Semaphore(3)
 _vision_semaphore = asyncio.Semaphore(2)
+_free_semaphore = asyncio.Semaphore(3)
 _client: httpx.AsyncClient | None = None
 _state: dict = {"cooldown": {}, "dead": set(), "version": -1}
 
@@ -141,17 +142,24 @@ def _record_failure(model: str, multi: bool, e: _ModelUnavailable | LLMError) ->
         logger.warning(f"[LLM] 模型 {model} 本次请求失败（{e}），单次问题不冷却")
 
 
+def thinking_payload(effort: str | None) -> dict:
+    """DeepSeek 思考模式参数（OpenAI 格式）：off = 关；low / high / max = 开并指定强度。"""
+    if effort in ("low", "high", "max"):
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": effort}
+    return {"thinking": {"type": "disabled"}}
+
+
 async def _call_once(model: str, messages: list, *, timeout: float, max_tokens: int,
-                     temp: float | None) -> str:
-    url, key = endpoint(), api_key()
+                     temp: float | None, effort: str | None = None, free: bool = False) -> str:
+    url, key = (free_model.endpoint(), free_model.api_key()) if free else (endpoint(), api_key())
     payload = {
         "model": model,
         "messages": messages,
         "temperature": temperature() if temp is None else temp,
         "max_tokens": max_tokens,
         "stream": False,
-        "thinking": {"type": "disabled"},
     }
+    payload.update(free_model.thinking_payload(effort) if free else thinking_payload(effort))
     try:
         client = await _get_client()
         resp = await client.post(url, json=payload, timeout=timeout,
@@ -172,7 +180,7 @@ async def _call_once(model: str, messages: list, *, timeout: float, max_tokens: 
         content = (choice["message"].get("content") or "").strip()
     except Exception as e:
         raise LLMError(f"响应解析失败: {e}")
-    _record_tokens(model, data.get("usage") or {})
+    _record_tokens(model, data.get("usage") or {}, effort=effort, free=free)
     if not content:
         raise LLMError(f"模型返回空内容（finish_reason={choice.get('finish_reason', '')}）")
     return content
@@ -212,23 +220,41 @@ def prices(ts: float | None = None) -> tuple[float, float, float]:
             env.get_float("AI_CHAT_PRICE_OUT", 4.0) * k)
 
 
-def _record_tokens(model: str, usage: dict) -> None:
+THINK_MARK = "#思考"
+
+
+def _record_tokens(model: str, usage: dict, effort: str | None = None, tag: str | None = None,
+                   free: bool = False) -> None:
     try:
         prompt = int(usage.get("prompt_tokens") or 0)
         hit = int(usage.get("prompt_cache_hit_tokens") or 0)
         miss = int(usage.get("prompt_cache_miss_tokens") or max(0, prompt - hit))
         out = int(usage.get("completion_tokens") or 0)
+        think = int(usage.get("reasoning_tokens") or (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
         if not (prompt or out):
             return
         ph, pm, po = prices()
-        cost = (hit * ph + miss * pm + out * po) / 1e6
-        tag = caller_tag()
+        cost = 0.0 if free else (hit * ph + miss * pm + out * po) / 1e6
+        tag = tag or caller_tag()
+        if effort in ("low", "high", "max"):
+            tag = f"{tag}{THINK_MARK}{effort}"  # 面板「模型花费」按这个把思考的花费单列出来
         day = date.today().isoformat()
-        for field, n in (("calls", 1), ("hit", hit), ("miss", miss), ("out", out), ("cost_u", int(round(cost * 1e6)))):
+        fields = [("calls", 1), ("hit", hit), ("miss", miss), ("out", out), ("cost_u", int(round(cost * 1e6)))]
+        if think:
+            fields.append(("think", think))
+        for field, n in fields:
             db.usage_add(day, f"llmtok:{field}", tag, "", n)
-        logger.info(f"[用量] {tag} 输入{prompt}（命中{hit}）输出{out} ≈{cost * 100:.3f}分")
+        if free:
+            db.usage_add(day, "llmfree:calls", tag, "", 1)
+        logger.info(f"[用量] {tag} 输入{prompt}（命中{hit}）输出{out}" + (f"（思考{think}）" if think else "")
+                    + (f" 免费（{model}）" if free else f" ≈{cost * 100:.3f}分"))
     except Exception as e:  # noqa: BLE001  记账失败不影响调用
         logger.debug(f"[用量] 记账失败: {e}")
+
+
+def record_usage(usage: dict, tag: str, effort: str | None = None, model: str = "") -> None:
+    """外部内核（DSH）的一次模型请求也记进同一本账。"""
+    _record_tokens(model or DEFAULT_MODEL, usage or {}, effort=effort, tag=tag)
 
 
 def usage_report(day: str | None = None) -> list[dict]:
@@ -256,8 +282,11 @@ def _count_usage(model: str) -> None:
 # ---------------- 对外接口 ----------------
 
 async def chat(messages: list[dict], timeout: float | None = None, max_tokens: int | None = None,
-               temperature: float | None = None) -> str:
-    """OpenAI 风格 messages → 回复文本；全部失败抛 LLMError。"""
+               temperature: float | None = None, effort: str | None = None) -> str:
+    """OpenAI 风格 messages → 回复文本；全部失败抛 LLMError。
+
+    effort：思考强度 off / low / high / max（默认不思考）。开思考时自动放大输出预算和超时，
+    免得只想不说被截断成空回复；思考的 token 按输出价计费，面板「模型花费」里单列。"""
     _reset_on_config_change()
     if not api_key():
         raise LLMError("未配置 API Key（AI_CHAT_LLM_API_KEY）")
@@ -267,8 +296,15 @@ async def chat(messages: list[dict], timeout: float | None = None, max_tokens: i
     multi = len(pool) > 1
     timeout = timeout or timeout_default()
     budget = max_tokens or max_tokens_default()
+    if effort in ("low", "high", "max"):
+        budget += {"low": 2048, "high": 6144, "max": 16384}[effort]
+        timeout = max(timeout, {"low": 60, "high": 120, "max": 240}[effort])
     if has_image(messages):
         logger.info(f"[LLM] 本条请求带图，使用模型池: {pool}")
+    elif free_model.enabled():
+        content = await _try_free(messages, timeout=timeout, max_tokens=budget, temp=temperature, effort=effort)
+        if content:
+            return content
     errors: list[str] = []
     async with _semaphore:
         for model in pool:
@@ -276,7 +312,8 @@ async def chat(messages: list[dict], timeout: float | None = None, max_tokens: i
                 continue
             for attempt in range(2):
                 try:
-                    content = await _call_once(model, messages, timeout=timeout, max_tokens=budget, temp=temperature)
+                    content = await _call_once(model, messages, timeout=timeout, max_tokens=budget, temp=temperature,
+                                               effort=effort)
                     logger.info(f"[AI聊天] 使用模型: {model}")
                     _count_usage(model)
                     return content
@@ -291,7 +328,7 @@ async def chat(messages: list[dict], timeout: float | None = None, max_tokens: i
                     break
                 except LLMError as e:
                     if attempt == 0 and "finish_reason=length" in str(e):
-                        budget = max(max_tokens_default() * 3, 768)
+                        budget = max(budget * 2, max_tokens_default() * 3, 768)
                         logger.warning(f"[LLM] 模型 {model} 输出被截断为空，放大预算到 {budget} 重试")
                         continue
                     errors.append(f"{model}: {e}")
@@ -300,15 +337,60 @@ async def chat(messages: list[dict], timeout: float | None = None, max_tokens: i
     raise LLMError("模型池全部不可用: " + " | ".join(errors[-5:]) if errors else "模型池全部处于冷却中")
 
 
-async def describe_image(data_url: str, max_len: int = 40) -> str:
-    """一句话图片描述（存进上下文，方便以后提到这张图）。失败返回空串。"""
+async def _try_free(messages: list, *, timeout: float, max_tokens: int, temp: float | None,
+                    effort: str | None) -> str:
+    """免费线路：按顺序试一遍免费模型，成功返回文本；全失败返回空串（调用方接着走付费），不抛异常。"""
+    tag = caller_tag()
+    pool = free_model.available_models(tag)
+    if not pool:
+        return ""
+    if not free_model.api_key():
+        free_model.ensure_service()
+        return ""
+    main = set(free_model.models())
+    need_json = free_model.wants_json(messages)
+    async with _free_semaphore:
+        for model in pool:
+            if effort in ("low", "high", "max"):
+                limit = max(free_model.timeout(), timeout)
+            elif model in main:
+                limit = min(timeout, free_model.timeout())
+            else:  # 后台任务的免费模型：慢一点没关系
+                limit = max(timeout, free_model.timeout())
+            try:
+                content = await _call_once(model, messages, timeout=limit, max_tokens=max_tokens, temp=temp,
+                                           effort=effort, free=True)
+                if need_json and not free_model.json_ok(content):
+                    raise LLMError("回的不是 JSON")
+                free_model.mark_ok(model)
+                _count_usage(model)
+                logger.info(f"[AI聊天] 使用免费模型: {model}")
+                return content
+            except _ModelUnavailable as e:
+                text = str(e)
+                if "网络错误" in text and ("ConnectError" in text or "Connect" in text):
+                    hint = free_model.ensure_service()
+                    secs = free_model.mark_failed(model, text, limited=False)
+                    logger.warning(f"[LLM] 免费模型服务连不上（{hint}），先用付费模型，{secs / 60:.0f} 分钟后再试")
+                    return ""
+                limited = e.quota or "429" in text or "limit" in text.lower()
+                secs = free_model.mark_failed(model, text, limited=limited)
+                logger.warning(f"[LLM] 免费模型 {model} 不可用（{text[:120]}），改用付费模型，冷却 {secs / 60:.0f} 分钟")
+            except LLMError as e:
+                secs = free_model.mark_failed(model, str(e), limited=False)
+                logger.warning(f"[LLM] 免费模型 {model} 本次失败（{e}），改用付费模型，冷却 {secs / 60:.0f} 分钟")
+    return ""
+
+
+async def describe_image(data_url: str, max_len: int = 40, prompt: str = "") -> str:
+    """一句话图片描述（存进上下文，方便以后提到这张图）。失败返回空串。prompt 可换成别的看图要求（如给表情包写备注）。"""
     if not data_url or not api_key() or not endpoint():
         return ""
     messages = [{
         "role": "user",
         "content": [
             {"type": "image_url", "image_url": {"url": data_url}},
-            {"type": "text", "text": "用一句话简短描述这张图片的内容和文字（如果有），30 字以内，直接输出描述本身，不要任何前缀或标点符号"},
+            {"type": "text", "text": prompt or "用一句话简短描述这张图片的内容和文字（如果有），30 字以内，直接输出描述本身，不要任何前缀或标点符号"},
         ],
     }]
     async with _vision_semaphore:

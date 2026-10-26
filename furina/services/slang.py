@@ -149,6 +149,86 @@ HOT: list[tuple[str, str]] = [
      "你是芙宁娜不是大肥鱼，被拿来比的时候可以嫌弃、吐槽，也可以玩梗认领（比如承认自己也是被养着的），但别说自己和她是同一种东西、别扯技术。"),
 ]
 
+# 「接梗」：群友说上半句 / 喊口令，大家默认要按梗接下半句（一本正经地回就是没听懂梗）
+# (触发正则, 梗是什么, 典型接法)。只放有固定接法的；纯词义的梗放在上面的 BUILTIN。
+CALLBACKS: list[tuple[str, str, list[str]]] = [
+    (r"申请起飞", "玩飞行塔台梗，等你像塔台一样批准", ["允许起飞", "批准起飞"]),
+    (r"申请(降落|着陆)", "飞行塔台梗", ["允许降落", "准许降落"]),
+    (r"申请(下班|摸鱼|睡觉|休息|放假|加餐|开饭|请假|吃饭|出击|出战)", "拿你当领导递申请，玩的是批条子", ["准了", "批准", "驳回"]),
+    (r"芜湖", "「芜湖起飞」梗（主播大司马的口头禅），兴奋时喊", ["起飞", "芜湖起飞"]),
+    (r"王牌飞行员申请出战", "英雄联盟库奇的台词梗", ["准许出战"]),
+    (r"天王盖地虎", "老土匪黑话对口令", ["宝塔镇河妖"]),
+    (r"大威天龙", "《西游降魔篇》法海台词，接下一句", ["大罗法咒", "世尊地藏，般若诸佛"]),
+    (r"床前明月光", "接诗", ["疑是地上霜"]),
+    (r"锄禾日当午", "接诗", ["汗滴禾下土"]),
+    (r"爱你孤身走暗巷", "《孤勇者》歌词接龙", ["爱你不跪的模样"]),
+    (r"听我说谢谢你", "《感恩的心》歌词接龙", ["因为有你，温暖了四季"]),
+    (r"宝宝你是一个", "接「香香软软的小蛋糕」", ["香香软软的小蛋糕"]),
+    (r"鸡你太美", "坤坤梗", ["哎哟你干嘛", "你干嘛哎哟"]),
+    (r"你干嘛[~～]*哎?哟|哎哟你干嘛", "坤坤梗", ["鸡你太美"]),
+    (r"早上好中国", "John Cena 冰淇淋梗", ["现在我有冰淇淋"]),
+    (r"原神[，,]?启动", "原神梗，喊一句就当玩梗", ["启动！", "启动不了，原神正在更新"]),
+    (r"原来你也玩原神", "原神梗", ["原来你也玩原神"]),
+    (r"我的评价是", "常接「不如原神」的梗", ["不如原神"]),
+    (r"你说得对[，,]?\s*但是", "原神「你说得对，但是」梗，后面接一段风马牛不相及的话", ["你说得对，但是我饿了", "但是什么但是"]),
+    (r"疯狂星期四|[Vv]我50|v我五十", "肯德基疯狂星期四梗，想让人转 50 块", ["v你50看看实力", "先v我50", "今天又不是星期四"]),
+    (r"扣1|扣个1|扣一", "让大家扣 1 回应", ["1"]),
+    (r"扣2|扣个2", "让大家扣 2 回应", ["2"]),
+    (r"收到请回复|收到请回答", "要回复收到", ["收到"]),
+    (r"我要验牌", "2024 年火的「验牌」梗", ["牌没有问题", "给我擦皮鞋"]),
+    (r"鸡汤来咯", "电影《征途》演员梗", ["你们怎么不喝啊", "喝啊，怎么不喝"]),
+    (r"不要回答", "《三体》梗", ["不要回答！不要回答！不要回答！"]),
+    (r"我要打十个", "叶问梗", ["我要打十个"]),
+    (r"奥利给", "快手主播的加油口号", ["奥利给！", "干了兄弟们"]),
+    (r"达咩", "日语「不行」", ["达咩哟达咩"]),
+    (r"[Cc]iallo", "柚子社打招呼梗", ["Ciallo～(∠・ω< )⌒★"]),
+    (r"晚安玛卡巴卡", "《花园宝宝》梗", ["晚安玛卡巴卡", "晚安唔西迪西"]),
+    (r"哈基米", "猫咪 / 「哈基米曼波」歌梗", ["曼波", "哈基米曼波", "南北绿豆"]),
+    (r"叮咚鸡", "叮咚鸡歌梗", ["大狗大狗叫叫叫"]),
+    (r"爱你老己", "「爱你老己，明天见」梗", ["明天见"]),
+    (r"孩子们[，, ]*我回来了", "「孩子们，我回来了」梗", ["爹？", "欢迎回来，饭在锅里"]),
+    (r"一眼丁真", "丁真梗", ["鉴定为纯纯的…"]),
+    (r"什么档次", "「什么档次，跟我用一样的XX」梗", ["什么档次，敢跟我用一样的"]),
+    (r"这河里吗", "「这合理吗」谐音", ["这不河里"]),
+    (r"冲冲冲|冲[！!]+", "兴奋地喊冲", ["冲！", "冲就完事了"]),
+    (r"开香槟", "「开香槟咯」庆祝梗，常带点立 flag 的意思", ["开香槟咯", "先别开，小心翻车"]),
+    (r"退[！!,，\s]*退[！!,，\s]*退", "驱赶晦气的梗", ["退退退"]),
+    (r"那我问你", "「那我问你」梗，准备反问", ["你问", "问吧"]),
+]
+_CALLBACK_RE = [(re.compile(p), m, r) for p, m, r in CALLBACKS]
+
+
+def callbacks_in(text: str, limit: int = 2) -> list[tuple[str, str, list[str]]]:
+    """群友这句话里有固定接法的梗：[(命中的词, 梗是什么, 典型接法)]。"""
+    out = []
+    for rx, meaning, replies in _CALLBACK_RE:
+        m = rx.search(text or "")
+        if m:
+            out.append((m.group(0), meaning, replies))
+            if len(out) >= limit:
+                break
+    return out
+
+
+def callback_note(text: str) -> str:
+    hits = callbacks_in(text)
+    if not hits:
+        return ""
+    rows = [f"「{w}」是梗（{m}），接一句就行，比如：" + " / ".join(f"「{x}」" for x in r) for w, m, r in hits]
+    return ("【群友在玩梗——按梗接下半句就收：只回一句短的，别再补第二句发挥、吐槽或加戏（多说反而假）；"
+            "别一本正经地反问，也别解释梗】\n" + "\n".join(rows))
+
+
+_AT_PREFIX = re.compile(r"^(\s*@\S+\s*)+")
+
+
+def is_pure_callback(text: str) -> bool:
+    """这条消息基本就是在喊梗（「@某人 申请起飞」），不是夹在一段正经话里：真人只回一句。"""
+    t = _AT_PREFIX.sub("", text or "").strip()
+    hits = callbacks_in(t, limit=1)
+    return bool(hits) and len(t) <= len(hits[0][0]) + 6
+
+
 _BUILTIN_MAP = {t: (m, u) for t, m, u in BUILTIN}
 
 # 群梗统计时忽略的常见话
@@ -239,11 +319,49 @@ def group_memes(group_id, limit: int = 6, days: float = 14) -> list[str]:
     return [k for k, _ in good[:limit]]
 
 
+# ---------------- 外部梗库（dsh-fish-tone 的热梗库，MIT）----------------
+_EXTRA: dict[str, tuple[str, bool]] | None = None
+_STRICT: set[str] = set()  # 短词 / 英文：要求独立出现，免得「就这样」里撞出「就这」
+
+
+def _extra() -> dict[str, tuple[str, bool]]:
+    """slang_memes.json：只用来「看懂」；能当句尾收口的少数几条才给她自己用。"""
+    global _EXTRA
+    if _EXTRA is None:
+        out: dict[str, tuple[str, bool]] = {}
+        try:
+            import json
+            from pathlib import Path
+
+            data = json.loads((Path(__file__).with_name("slang_memes.json")).read_text(encoding="utf-8"))
+            for term, gloss, usage, tail, aliases in data.get("memes", []):
+                meaning = gloss + (f"（用法：{usage}）" if usage and usage != term else "")
+                for t in [term, *aliases]:
+                    t = str(t).strip()
+                    if not t or t in out:
+                        continue
+                    out[t] = (meaning, bool(tail) and t == term)
+                    if len(t) <= 2 or t.isascii():
+                        _STRICT.add(t)
+        except Exception:  # noqa: BLE001
+            out = {}
+        _EXTRA = out
+    return _EXTRA
+
+
+def _strict_hit(term: str, text: str) -> bool:
+    if term.isascii():
+        return re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", text, re.IGNORECASE) is not None
+    return re.search(rf"(?:^|[^\u4e00-\u9fff]){re.escape(term)}(?:$|[^\u4e00-\u9fff])", text) is not None
+
+
 # ---------------- 查询 ----------------
 def lexicon() -> dict[str, tuple[str, bool]]:
     lex = dict(_BUILTIN_MAP)
     for x in learned():
         lex.setdefault(x["term"], (x["meaning"], True))
+    for t, v in _extra().items():
+        lex.setdefault(t, v)
     return lex
 
 
@@ -253,10 +371,13 @@ def find_in(text: str, limit: int = 5) -> list[tuple[str, str]]:
         return []
     out, seen = [], set()
     for term, (meaning, _u) in sorted(lexicon().items(), key=lambda kv: -len(kv[0])):
-        if term in seen:
+        if term in seen or any(term in s for s in seen):  # 「这很难评」已经命中，就别再报「很难评」
             continue
         if len(term) <= 1 or term.isdigit():
             if not re.search(rf"(?:^|[\s，。！？,.!?]){re.escape(term)}(?:$|[\s，。！？,.!?])", text):
+                continue
+        elif term in _STRICT and term not in _BUILTIN_MAP:
+            if not _strict_hit(term, text):
                 continue
         elif term.lower() not in text.lower():
             continue

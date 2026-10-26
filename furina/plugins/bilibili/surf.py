@@ -31,7 +31,7 @@ from nonebot import logger
 
 from ...core import env, llm
 from ...services import slang
-from ...services.bilibili import store
+from ...services.bilibili import store, taste
 from ...services.bilibili.client import BiliError, Client, NotLoggedIn, RiskControl
 
 
@@ -58,6 +58,11 @@ def cfg() -> dict:
         "mention_prob": env.get_float("BILI_MENTION_PROBABILITY", 0.5),
         "interests": [s.strip() for s in re.split(r"[,，、]", env.get(
             "BILI_INTERESTS", "原神,芙宁娜,枫丹,音乐剧,歌剧,甜点,蛋糕,猫猫,搞笑,鬼畜,舞台剧,探店")) if s.strip()],
+        "partner_mid": re.sub(r"\D", "", env.get("BILI_PARTNER_MID", "")),
+        "roam_tags": [s.strip() for s in re.split(r"[,，、]", env.get("BILI_ROAM_TAGS", "大肥鱼")) if s.strip()],
+        "roam_prob": env.get_float("BILI_ROAM_PROBABILITY", 0.3),
+        "homework_on": env.get_bool("BILI_HOMEWORK_ENABLED", True),
+        "homework_max": env.get_int("BILI_HOMEWORK_DAILY_MAX", 0),
         "dry_run": env.get_bool("BILI_DRY_RUN", False),
         "pause_hours": env.get_float("BILI_RISK_PAUSE_HOURS", 24.0),
         "share_prob": env.get_float("BILI_SHARE_PROBABILITY", 0.6),
@@ -132,7 +137,7 @@ WATCH_PROMPT = """你是帮芙宁娜「先看一遍视频」的人。她看不�
 SPEECH_OK = "字幕是机器或人工转写的口播，可能有错别字。"
 SPEECH_NONE = "这个视频没有可读的字幕（要么没人声、要么字幕压在画面里读不到），别把它说成「视频是空的」，只能凭标题、简介和评论区判断。"
 
-SURF_PROMPT = """你刚刷到下面几个视频（每个附了一份「先看过一遍的人」写的小报告，或者简介、字幕节选、弹幕和热评，帮你知道视频讲了什么）：
+SURF_PROMPT = """{taste}你刚刷到下面几个视频（每个附了一份「先看过一遍的人」写的小报告，或者简介、字幕节选、弹幕和热评，帮你知道视频讲了什么）：
 
 {videos}
 
@@ -157,10 +162,14 @@ SURF_PROMPT = """你刚刷到下面几个视频（每个附了一份「先看过
 - dynamic：如果这几个视频让你特别想发条 B 站动态（15~80 字的生活碎碎念），就写；不想发就空。
 {slang_hint}"""
 
-MENTION_FIELD = ', "mention": "想叫主人{name}一起来看时对他说的话或空"'
-MENTION_RULE = ("\n- mention：{name} 是你主人（在 B 站上你叫他「主人」）。只有你真心觉得主人一定会喜欢这个视频、"
-                "或者特别想让他陪你一起看时，才写一句对他说的话（如「主人快来看，这不就是你」「主人我也想要这个」），"
-                "不超过 20 字，大多数留空。")
+MENTION_FIELD = (', "mention": "想艾特主人{name}时对他说的话或空", '
+                 '"homework": "想把这个视频甩给主人、命令他给你总结时对他说的话或空"')
+MENTION_RULE = ("\n- mention：{name} 是你主人（在 B 站上你叫他「主人」）。艾特不艾特、说什么全看你自己的心情："
+                "可以叫他来一起看（「主人快来看，这不就是你」），可以顺手替他把视频总结成两三句（「主人我替你看完了：……」），"
+                "也可以随便吐槽、撒娇、使唤他。不超过 60 字；没想叫他就留空。"
+                "\n- homework：倒反天罡——平时都是别人让你总结视频，你也可以反过来把视频甩给主人，霸气抖 S 地命令他总结、限时交作业"
+                "（如「这个视频给我总结成三句话，今晚十二点前交，写不好重写」「看完给我讲讲重点，敢糊弄你就完了」），"
+                "不超过 40 字；想不想布置看你心情。和 mention 二选一（都写就按 homework）。")
 
 DYNAMIC_PROMPT = """现在是晚上，你在想要不要在 B 站发一条动态，随手记一下今天。
 你今天刷到过的视频和当时的感受：
@@ -280,7 +289,8 @@ def parse_round(raw: str) -> dict:
             "comment": clean_line(it.get("comment"), 60),
             "danmaku": clean_line(dm.get("text"), 20), "second": second,
             "share": clean_line(it.get("share"), 50),
-            "mention": clean_line(it.get("mention"), 30)})
+            "mention": clean_line(it.get("mention"), 80),
+            "homework": clean_line(it.get("homework"), 50)})
     for s in data.get("new_slang") or []:
         if isinstance(s, dict) and s.get("term") and s.get("meaning"):
             out["new_slang"].append({"term": str(s["term"]).strip()[:16], "meaning": str(s["meaning"]).strip()[:60]})
@@ -325,18 +335,39 @@ async def _pause(auto: tuple[float, float], manual_s: tuple[float, float], manua
 # ---------------- 一轮 ----------------
 async def _candidates(cli: Client, c: dict, keyword: str = "") -> list[dict]:
     roll = random.random()
+    # 最上面一段（BILI_ROAM_PROBABILITY）去逛常去的标签；再往下一段（BILI_TASTE_PROBABILITY）按她最近迷上的东西去搜；
+    # 其余按原来的比例：推荐 / 兴趣词 / 热门
+    cut = 1.0 - max(0.0, min(1.0, c.get("roam_prob", 0))) if c.get("roam_tags") else 1.0
+    fav = taste.pick_keyword() if taste.conf()["enabled"] else ""
+    tcut = max(0.0, cut - taste.conf()["prob"] * cut) if fav else cut
     if keyword:
-        found, where = await cli.search(keyword), f"搜「{keyword}」"
-    elif roll < 0.55:
+        found, where = _src(await cli.search(keyword), f"搜「{keyword}」"), f"搜「{keyword}」"
+    elif roll >= cut:
+        tag = random.choice(c["roam_tags"])
+        found, where = roam_filter(await cli.search(tag), tag), f"逛「{tag}」标签"
+    elif roll >= tcut:
+        found, where = _src(await cli.search(fav), f"搜「{fav}」"), f"搜最近迷上的「{fav}」"
+    elif (roll := roll / tcut if tcut > 0 else roll) < 0.55:
         found, where = await cli.feed(), "首页推荐"
     elif roll < 0.85 and c["interests"]:
         kw = random.choice(c["interests"])
-        found, where = await cli.search(kw), f"搜「{kw}」"
+        found, where = _src(await cli.search(kw), f"搜「{kw}」"), f"搜「{kw}」"
     else:
         found, where = await cli.popular(), "热门"
     _log(f"打开了{where}，看到 {len(found)} 个视频")
     seen = store.watched_ids()
     return [v for v in found if v["bvid"] not in seen and 20 <= int(v.get("duration") or 0) <= 25 * 60]
+
+
+def _src(found: list[dict], source: str) -> list[dict]:
+    return [dict(v, source=v.get("source") or source) for v in found]
+
+
+def roam_filter(found: list[dict], tag: str) -> list[dict]:
+    """逛标签：只留标签（或标题）里真带这个词的视频，搜索结果里沾边的不算。"""
+    t = tag.lower()
+    return [dict(v, source=f"「{tag}」标签") for v in found
+            if t in str(v.get("tags") or "").lower() or t in str(v.get("title") or "").lower()]
 
 
 def gate(info: dict, c: dict, now: float | None = None) -> str:
@@ -428,8 +459,13 @@ async def run_round(notify=None, share=None, *, manual: bool = False, keyword: s
                 for v in videos:
                     v["report"] = await _watch(v)
             store.set_live("thinking", videos[-1], "回味一下刚才看的")
+            if not c["mention"] and c["partner_mid"]:
+                c["mention"] = await _partner_name(cli, c["partner_mid"])
             mention = c["mention"]
+            tl = taste.taste_line()
             prompt = SURF_PROMPT.format(
+                taste=(f"（你最近的口味，会慢慢变：{tl}。按你现在的口味打分就好，腻了的可以给低一点，新鲜的也可能戳中你。）\n\n"
+                       if tl else ""),
                 videos="\n\n".join(_video_block(v) for v in videos),
                 mention_field=MENTION_FIELD.format(name=mention) if mention else "",
                 mention_rule=MENTION_RULE.format(name=mention) if mention else "",
@@ -441,10 +477,19 @@ async def run_round(notify=None, share=None, *, manual: bool = False, keyword: s
                 return f"想感受一下但模型没回：{e}"
             reactions = result["videos"]
             by_id = {v["bvid"]: v for v in videos}
-            store.add_watched([{"bvid": r["bvid"], "title": by_id[r["bvid"]]["title"], "up": by_id[r["bvid"]]["up"],
-                                "pic": by_id[r["bvid"]].get("pic", ""), "thought": r["thought"],
-                                "interest": r["interest"], "acts": []}
-                               for r in reactions if r["bvid"] in by_id])
+            seen_items = [{"bvid": r["bvid"], "title": by_id[r["bvid"]]["title"], "up": by_id[r["bvid"]]["up"],
+                           "pic": by_id[r["bvid"]].get("pic", ""), "thought": r["thought"],
+                           "interest": r["interest"], "acts": [], "tname": by_id[r["bvid"]].get("tname", ""),
+                           "tags": str(by_id[r["bvid"]].get("tags") or "")[:80],
+                           "source": by_id[r["bvid"]].get("source", "")}
+                          for r in reactions if r["bvid"] in by_id]
+            store.add_watched(seen_items)
+            try:
+                changed = taste.learn(seen_items)
+                if changed:
+                    _log("口味变了一点：" + "、".join(changed[:3]), "thought")
+            except Exception as e:  # noqa: BLE001
+                logger.info(f"[B站] 记口味失败：{e}")
             for r in reactions:
                 if r["bvid"] in by_id:
                     _log(f"《{by_id[r['bvid']]['title'][:24]}》{r['interest']}分：{r['thought']}", "thought", bvid=r["bvid"])
@@ -554,9 +599,14 @@ async def _act(cli: Client, c: dict, reactions: list[dict], by_id: dict, share, 
                     logger.info(f"[B站] 弹幕没发出去（{e}）")
                     _log(f"弹幕没发出去：{e.message or e.code}", "error")
         # 评论
-        text, at = r["comment"], None
-        if c["mention"] and r["mention"] and r["interest"] >= 8 and random.random() < c["mention_prob"]:
-            mid = await _mention_mid(cli, c["mention"])
+        text, at, homework = r["comment"], None, False
+        # 艾特主人说什么、要不要艾特全看她（只受开关、每天上限和「想艾特时真艾特的概率」约束）
+        if c["mention"] and r.get("homework") and c["homework_on"] and under_cap("homework", c["homework_max"]):
+            mid = c["partner_mid"] or await _mention_mid(cli, c["mention"])
+            if mid:
+                text, at, homework = f"@{c['mention']} {r['homework']}", {c["mention"]: int(mid)}, True
+        elif c["mention"] and r["mention"] and random.random() < c["mention_prob"]:
+            mid = c["partner_mid"] or await _mention_mid(cli, c["mention"])
             if mid:
                 text, at = f"@{c['mention']} {r['mention']}", {c["mention"]: int(mid)}
         if text and c["comment_on"] and v["bvid"] not in commented and under_cap("comments", c["comment_max"]):
@@ -568,6 +618,8 @@ async def _act(cli: Client, c: dict, reactions: list[dict], by_id: dict, share, 
                 try:
                     rpid = await cli.comment(v["aid"], text, at)
                     store.bump("comments")
+                    if homework:
+                        store.bump("homework")
                     store.add_post("comment", text, bvid=v["bvid"], title=v["title"], rpid=rpid)
                     commented.add(v["bvid"])
                     _mark_act(v["bvid"], "comment")
@@ -594,6 +646,22 @@ async def _act(cli: Client, c: dict, reactions: list[dict], by_id: dict, share, 
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"[B站] 分享到群失败：{e}")
     return done_acts
+
+
+async def _partner_name(cli: Client, mid: str) -> str:
+    """只填了主人 UID 没填昵称：按 UID 查一次昵称（缓存一天）。"""
+    cache = store.get_meta("partner") or {}
+    if cache.get("mid") == mid and cache.get("name") and time.time() - float(cache.get("ts") or 0) < 86400:
+        return str(cache["name"])
+    try:
+        card = await cli.user_card(mid)
+    except RiskControl:
+        raise
+    except BiliError:
+        card = {}
+    if card.get("name"):
+        store.set_meta("partner", {"mid": mid, "name": card["name"], "ts": time.time()})
+    return str(card.get("name") or "")
 
 
 async def _mention_mid(cli: Client, name: str) -> str:

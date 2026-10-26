@@ -128,6 +128,7 @@ async def _enhance_one() -> None:
     try:
         from ...core.task_queue import upscale_queue
         from ..upscale.upscale import run_upscale
+        from ..upscale import config as upscale_config
     except Exception as e:  # noqa: BLE001
         _state["enh_note"] = f"强化模块不可用: {e}"
         return
@@ -151,13 +152,29 @@ async def _enhance_one() -> None:
         ticket = upscale_queue.enqueue()
         async with ticket:
             await run_upscale(str(src), str(out))
-        ok = await asyncio.to_thread(svc.apply_enhanced, iid, out)
+        ok = await asyncio.to_thread(svc.apply_enhanced, iid, out,
+                                     model=upscale_config.UPSCALE_MODEL,
+                                     expected_scale=upscale_config.UPSCALE_SCALE)
         if not ok:
-            await asyncio.to_thread(svc.set_enh, iid, "done")
-        logger.info(f"[筛图] 已强化 {iid}")
+            # 用户可能在 GPU 运行时丢掉图；结果未应用绝不能标完成。
+            # 留 todo 但 trash 不会被调度，撤销后才会重新强化。
+            await asyncio.to_thread(svc.set_enh, iid, "todo")
+            await asyncio.to_thread(svc.record_enhance_event, it, "skipped", reason="item_state_changed",
+                                   model=upscale_config.UPSCALE_MODEL,
+                                   expected_scale=upscale_config.UPSCALE_SCALE)
+            logger.info(f"[筛图] 强化结果未应用 {iid}，撤销丢弃后可重新处理")
+            return
+        audit = await asyncio.to_thread(svc.enhance_audit, iid) or {}
+        logger.info(f"[筛图] 已强化 {iid} "
+                    f"{audit.get('input_w')}x{audit.get('input_h')} {audit.get('input_size')}B -> "
+                    f"{audit.get('output_w')}x{audit.get('output_h')} {audit.get('output_size')}B "
+                    f"md5={audit.get('output_md5')}")
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[筛图] 强化 {iid} 失败，按原图处理: {e}")
         await asyncio.to_thread(svc.set_enh, iid, "fail")
+        await asyncio.to_thread(svc.record_enhance_event, it, "fail", reason=type(e).__name__,
+                               model=upscale_config.UPSCALE_MODEL,
+                               expected_scale=upscale_config.UPSCALE_SCALE)
     finally:
         Path(out).unlink(missing_ok=True)
 

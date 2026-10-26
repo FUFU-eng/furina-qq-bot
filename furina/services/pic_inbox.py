@@ -25,6 +25,8 @@ from ..core import db, env
 NS = "pic_inbox"
 NS_SEEN = "pic_seen"
 NS_META = "pic_inbox_meta"
+NS_ENH_AUDIT = "pic_enhance_audit"
+ENH_AUDIT_KEEP_DAYS = 30
 
 DEFAULT_DIR = r"D:\FurinaPicInbox"
 DEFAULT_EXPORT = r"D:\Pictures\Eagle"
@@ -272,10 +274,11 @@ def _all() -> list[dict]:
     return [v for v in db.items(NS).values() if isinstance(v, dict) and v.get("id")]
 
 
-def pending(limit: int = 60, newest_first: bool = False) -> list[dict]:
+def pending(limit: int = 60, newest_first: bool = False, offset: int = 0) -> list[dict]:
     rows = [it for it in _all() if it.get("status") == "pending"]
     rows.sort(key=lambda it: it.get("ts", 0), reverse=newest_first)
-    return rows[: max(1, int(limit))]
+    off = max(0, int(offset))
+    return rows[off: off + max(1, int(limit))]
 
 
 def stats() -> dict:
@@ -332,6 +335,27 @@ def decide(iid: str, keep: bool) -> dict:
     if keep:
         export_ready(only=iid)
     return {"ok": True}
+
+
+def decide_many(ids: list[str], keep: bool) -> dict:
+    """手机端多选后一次提交：逐张处理，返回成功/失败的 id。"""
+    done, failed, reasons = [], [], {}
+    for iid in dict.fromkeys(str(i) for i in ids if i):
+        # 断网重试：同一个决定已经落地就算成功，不重复计数/导出。
+        it = get(iid)
+        already = it and (it.get("status") in ("keep", "out") if keep else it.get("status") == "trash")
+        res = {"ok": True} if already else decide(iid, keep)
+        (done if res.get("ok") else failed).append(iid)
+        if not res.get("ok"):
+            reasons[iid] = res.get("reason", "gone")
+    return {"ok": True, "done": done, "failed": failed, "reasons": reasons}
+
+
+def undo_many(ids: list[str]) -> dict:
+    done, failed = [], []
+    for iid in dict.fromkeys(str(i) for i in ids if i):
+        (done if undo(iid).get("ok") else failed).append(iid)
+    return {"ok": True, "done": done, "failed": failed}
 
 
 def undo(iid: str) -> dict:
@@ -444,6 +468,9 @@ def purge(now: float | None = None) -> int:
         for k, v in db.items(NS_SEEN).items():
             if not isinstance(v, dict) or float(v.get("t") or 0) < cutoff:
                 db.delete(NS_SEEN, k)
+        for k, v in db.items(NS_ENH_AUDIT).items():
+            if not isinstance(v, dict) or float(v.get("ts") or 0) < now - ENH_AUDIT_KEEP_DAYS * 86400:
+                db.delete(NS_ENH_AUDIT, k)
     return n
 
 
@@ -477,7 +504,23 @@ def set_enh(iid: str, state: str) -> None:
             db.update(NS, iid, _u)
 
 
-def apply_enhanced(iid: str, upscaled: Path) -> bool:
+def enhance_audit(iid: str) -> dict | None:
+    """只留尺寸/体积/内容哈希，主队列清理后仍可核验；不存图片、昵称或账号。"""
+    row = db.get(NS_ENH_AUDIT, str(iid))
+    return row if isinstance(row, dict) else None
+
+
+def record_enhance_event(it: dict, state: str, *, model: str = "", expected_scale: int = 0,
+                         reason: str = "", **facts) -> dict:
+    row = {"id": it["id"], "ts": time.time(), "state": state, "model": str(model)[:100],
+           "expected_scale": int(expected_scale), "reason": str(reason)[:120],
+           "input_w": it.get("w", 0), "input_h": it.get("h", 0),
+           "input_size": it.get("size", 0), "input_md5": it.get("md5", ""), **facts}
+    db.put(NS_ENH_AUDIT, it["id"], row)
+    return row
+
+
+def apply_enhanced(iid: str, upscaled: Path, *, model: str = "", expected_scale: int = 0) -> bool:
     """把超分结果换进来：有透明通道存 PNG，否则存 JPEG q95（省 E 盘空间）。"""
     from PIL import Image
 
@@ -486,7 +529,18 @@ def apply_enhanced(iid: str, upscaled: Path) -> bool:
         if not it or it.get("status") not in ("pending", "keep"):
             return False
         Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+        old = pending_dir() / it["file"]
+        original_bytes = old.read_bytes()
+        with Image.open(io.BytesIO(original_bytes)) as original:
+            input_w, input_h = original.size
         with Image.open(upscaled) as im:
+            w, h = im.size
+            if w * h > MAX_PIXELS:
+                raise ValueError("强化输出尺寸过大")
+            if w <= input_w or h <= input_h:
+                raise ValueError(f"强化输出没有实际放大: {input_w}x{input_h} -> {w}x{h}")
+            if expected_scale > 1 and (w, h) != (input_w * expected_scale, input_h * expected_scale):
+                raise ValueError(f"强化输出倍率不符: 期望 {expected_scale}x, 实际 {w}x{h}")
             im.load()
             alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
             buf = io.BytesIO()
@@ -497,20 +551,32 @@ def apply_enhanced(iid: str, upscaled: Path) -> bool:
                 im.convert("RGB").save(buf, "JPEG", quality=95, subsampling=0, optimize=True)
                 ext = "jpg"
             w, h = im.size
-        old = pending_dir() / it["file"]
+        encoded = buf.getvalue()
         name = f"{iid}.{ext}"
         tmp = pending_dir() / (name + ".part")
-        tmp.write_bytes(buf.getvalue())
-        _move(tmp, pending_dir() / name)
+        tmp.write_bytes(encoded)
+        final = pending_dir() / name
+        _move(tmp, final)
+        output_md5 = hashlib.md5(encoded).hexdigest()
+        if hashlib.md5(final.read_bytes()).hexdigest() != output_md5:
+            raise OSError("强化文件写回校验失败")
         if old.name != name:
             try:
                 _unlink(old)
             except OSError:
                 pass
         for q in preview_dir().glob(iid + "_*.jpg"):
-            q.unlink(missing_ok=True)
-        it.update(file=name, size=len(buf.getvalue()), w=w, h=h, enh="done")
+            try:
+                _unlink(q, 3)
+            except OSError:
+                pass  # 正在发给手机的旧缓存可稍后清理；不能把成功写回误报失败
+        before = dict(it)
+        it.update(file=name, size=len(encoded), w=w, h=h, enh="done")
         db.put(NS, iid, it)
+        record_enhance_event(before, "done", model=model, expected_scale=expected_scale,
+                             input_w=input_w, input_h=input_h, input_size=len(original_bytes),
+                             input_md5=hashlib.md5(original_bytes).hexdigest(),
+                             output_w=w, output_h=h, output_size=len(encoded), output_md5=output_md5)
     return True
 
 
@@ -525,8 +591,13 @@ def preview(iid: str, max_side: int = 1600) -> Path | None:
         return None
     if max_side <= 0 or max(it.get("w", 0), it.get("h", 0)) <= max_side and src.suffix.lower() in (".jpg", ".jpeg"):
         return src
-    out = preview_dir() / f"{iid}_{int(max_side)}.jpg"
-    if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
+    # 缓存文件不可变：强化前后的预览用不同文件名，Windows 正在发送旧图时也不用覆盖它。
+    stamp = src.stat().st_mtime_ns
+    legacy = preview_dir() / f"{iid}_{int(max_side)}.jpg"
+    if legacy.exists() and legacy.stat().st_mtime_ns >= stamp:
+        return legacy
+    out = preview_dir() / f"{iid}_{int(max_side)}_{stamp}.jpg"
+    if out.exists():
         return out
     from PIL import Image
 
@@ -540,10 +611,75 @@ def preview(iid: str, max_side: int = 1600) -> Path | None:
             im2 = bg
         else:
             im2 = im.convert("RGB")
-        tmp = out.with_suffix(".part")
+        tmp = out.with_name(f"{out.stem}.{threading.get_ident()}.part")  # 预热线程和请求可能同时生成同一张
         im2.save(tmp, "JPEG", quality=85)
-        os.replace(tmp, out)
+        try:
+            if not out.exists():
+                os.replace(tmp, out)
+        except PermissionError:
+            if not out.exists():
+                raise  # 同版本另一个线程先生成好则复用，不覆盖正在发送的文件
+        finally:
+            try:
+                _unlink(tmp, 3)
+            except OSError:
+                pass  # 杀毒短暂占用临时文件，不耽误发图
     return out
+
+
+_warm_q: list[tuple[str, int]] = []
+_warm_lock = threading.Lock()
+_warm_running = False
+WARM_SIZES = (480, 1600)
+
+
+def warm_previews(ids: list[str], sizes: tuple[int, ...] = WARM_SIZES, wait: bool = False) -> int:
+    """手机端一打开就把待筛图的缩略图/大图先生成好，滑的时候不用等电脑现做。后台单线程慢慢做。"""
+    global _warm_running
+    jobs = []
+    for iid in ids:
+        it = get(iid)
+        if not it:
+            continue
+        src = file_path(it)
+        if not src.exists():
+            continue
+        stamp = src.stat().st_mtime_ns
+        for sz in sizes:
+            if max(it.get("w", 0), it.get("h", 0)) <= sz and src.suffix.lower() in (".jpg", ".jpeg"):
+                continue
+            legacy = preview_dir() / f"{iid}_{int(sz)}.jpg"
+            cached = legacy.exists() and legacy.stat().st_mtime_ns >= stamp
+            if not cached and not (preview_dir() / f"{iid}_{int(sz)}_{stamp}.jpg").exists():
+                jobs.append((iid, int(sz)))
+    if not jobs:
+        return 0
+    with _warm_lock:
+        known = set(_warm_q)
+        _warm_q.extend(j for j in jobs if j not in known)
+        start = not _warm_running
+        if start:
+            _warm_running = True
+
+    def run():
+        global _warm_running
+        while True:
+            with _warm_lock:
+                if not _warm_q:
+                    _warm_running = False
+                    return
+                iid, sz = _warm_q.pop(0)
+            try:
+                preview(iid, sz)
+            except Exception:  # noqa: BLE001  坏图跳过，不影响别的
+                pass
+
+    if start:
+        if wait:
+            run()
+        else:
+            threading.Thread(target=run, name="pic-warm", daemon=True).start()
+    return len(jobs)
 
 
 # ---------------- 手机端密码 ----------------

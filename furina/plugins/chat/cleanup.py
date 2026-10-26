@@ -12,21 +12,54 @@ _CJK = r"\u4e00-\u9fff\u3400-\u4dbf"
 
 
 def drop_periods(text: str) -> str:
-    """真人在 QQ 里几乎不打句号：句末的「。」删掉，句中的「。」换成逗号。
-    「。。。」这种连打的保留（那是在表达无语）；表情标记、链接不动。"""
-    if not text or ("。" not in text and "." not in text):
+    """聊天单句号：中间换逗号、末尾去掉；代码/网址/小数/文件名及无语省略号保留。"""
+    if not text or not any(c in text for c in "。｡．."):
         return text
+    spans = []
+    token = re.compile(r"\ue000(\d+)\ue001")
+
+    def hold(value: str, kind: str = "literal") -> str:
+        spans.append((value, kind))
+        return f"\ue000{len(spans) - 1}\ue001"
+
+    def protect(match):
+        return hold(match.group(0))
+
+    # 先屏蔽机器内容，避免把网页、版本、代码中的点误当标点。
+    masked = re.sub(r"```[\s\S]*?(?:```|$)", protect, text)
+    masked = re.sub(r"`[^`\n]+`", protect, masked)
+    masked = re.sub(r"\[CQ:[^\]\n]+\]|<<STICKER:\d+>>", lambda m: hold(m.group(0), "marker"), masked)
+
+    def url(match):
+        value, suffix = match.group(0), ""
+        while value.endswith("."):
+            value, suffix = value[:-1], "." + suffix
+        # Markdown 外层右括号不属于网址；URL 自身成对的括号保留。
+        while value.endswith(")") and value.count(")") > value.count("("):
+            value, suffix = value[:-1], ")" + suffix
+        return hold(value) + suffix
+
+    masked = re.sub(r"(?:https?://|www\.)[^\s<>\"'。｡，！？；、]+", url, masked)
+    masked = re.sub(r"[\w.+-]+@(?:[\w-]+\.)+[A-Za-z]{2,63}\b", protect, masked)
+    masked = re.sub(r"(?:[A-Za-z]:[\\/])[^\s<>\"'。｡，！？；、]+", protect, masked)
+    masked = re.sub(r"[\w-]+(?:\.[\w-]+)*\.(?:py|json|txt|md|log|jpg|jpeg|png|gif|webp|apk|zip|pdf|exe|bat|env|toml|ya?ml|html?|js|ts|css|mp3|wav|mp4|csv|ckpt|pth)\b", protect, masked, flags=re.I)
+    masked = re.sub(r"(?:[A-Za-z0-9-]+\.)+(?:com|cn|net|org|io|dev|app|ai|cc|me|edu|gov|co|uk|de|jp)\b", protect, masked, flags=re.I)
+    masked = re.sub(r"\d+(?:\.\d+)+", protect, masked)
+    masked = re.sub(r"。{2,}|\.{2,}|．{2,}|｡{2,}", protect, masked)
+
     out = []
-    for line in text.split("\n"):
-        # 句中：单个「。」后面还有字 → 逗号
-        line = re.sub(r"(?<!。)。(?!。)\s*(?=[^\s」』）)\]>】。<，,！？!?])", "，", line)
-        line = re.sub(r"(?<!。)。(?!。)(?=[」』”])", "", line)  # 引号里收尾的句号
-        # 句末：单个「。」（后面只剩引号/括号/表情标记）→ 删掉
-        line = re.sub(r"(?<!。)。(?!。)(?=[\s」』）)\]】]*(?:<<STICKER:\d+>>)?\s*$)", "", line)
-        # 中文后面跟英文句点收尾：同样删掉
-        line = re.sub(rf"(?<=[{_CJK}])\.(?=\s*$)", "", line)
-        out.append(re.sub(r" {2,}", " ", line).rstrip())
-    return "\n".join(out).strip()
+    for line in masked.split("\n"):
+        def punctuation(match):
+            tail = line[match.end():].lstrip(" \t\u200b\ufeff")
+            if not tail or tail[0] in "\"'」』”’）)]】}>，,！？!?；;":
+                return ""
+            # 表情标记或emoji收尾，不要在表情前留下一个孤零零的逗号。
+            logical = token.sub(lambda m: "" if spans[int(m.group(1))][1] == "marker" else "字", tail)
+            return "，" if any(c.isalnum() for c in logical) else ""
+        line = re.sub(r"(?:[。｡．]|(?<!\.)\.(?!\.))[ \t]*", punctuation, line)
+        out.append(line.rstrip())
+    cleaned = "\n".join(out)
+    return token.sub(lambda m: spans[int(m.group(1))][0], cleaned).strip()
 
 
 def _split_reply_parts(reply: str) -> list[str] | None:
@@ -79,7 +112,7 @@ def _split_reply_parts(reply: str) -> list[str] | None:
     part1 = reply[:cut].strip()
     part2 = reply[cut:].strip()
     # 拆成两句时，第一句末尾不留逗号/顿号这类「话没说完」的标点
-    part1 = part1.rstrip("，,、:：;；。")
+    part1 = re.sub(r"(?<!。)。$", "", part1.rstrip("，,、:：;；"))
     if len(part1) < 4 or len(part2) < 4:
         return None
     return [part1, part2]
@@ -206,13 +239,13 @@ def _trim_reply(text: str, max_len: int) -> str:
     """超长回复截断到 max_len 字符，尽量在标点处断开，避免硬切。max_len<=0 表示不限。"""
     text = (text or "").strip()
     if max_len <= 0 or len(text) <= max_len:
-        return text.rstrip("。")
+        return re.sub(r"(?<!。)。$", "", text)
     cut = text[:max_len]
     for punct in ("。", "！", "？", "～", "~", "…", "，", ","):
         idx = cut.rfind(punct)
         if idx >= max_len * 0.5:
-            return cut[: idx + 1].strip().rstrip("。")
-    return cut.strip().rstrip("。")
+            return re.sub(r"(?<!。)。$", "", cut[: idx + 1].strip())
+    return re.sub(r"(?<!。)。$", "", cut.strip())
 
 
 def _scrub_fixed_template(text: str) -> str:

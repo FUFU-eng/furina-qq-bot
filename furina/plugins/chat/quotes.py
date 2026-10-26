@@ -158,11 +158,19 @@ async def _parse_reply_message(reply_message, bot=None) -> QuoteInfo:
         elif stype == "at":
             texts.append(at_label(sdata.get("qq")) or "[@某人]")
 
+    texts.extend(await _expand_forwards(inline_nodes, forward_ids, bot))
+
+    full = "\n".join(t for t in texts if t)
+    return QuoteInfo(images=images, text=full[: config.QUOTE_MAX_CHARS], failed=False, image_segments=image_segments,
+                     forward=is_forward or bool(forward_ids))
+
+
+async def _expand_forwards(inline_nodes: list, forward_ids: list, bot=None) -> list[str]:
+    """合并转发 → 「[合并转发内容]\n谁: 说了什么」；新版 NapCat 直接带节点，旧版要按 id 去取。"""
+    texts = []
     if inline_nodes:
         lines = _forward_lines(inline_nodes[: config.FORWARD_MAX_NODES])
         texts.append("[合并转发内容]\n" + "\n".join(lines) if lines else "[合并转发]")
-
-    # 引用的如果是合并转发，展开读取各节点内容
     for fid in forward_ids[:3]:
         try:
             bot = bot or bot_for()
@@ -175,10 +183,24 @@ async def _parse_reply_message(reply_message, bot=None) -> QuoteInfo:
         except Exception as e:
             logger.warning(f"[AI聊天] 读取合并转发失败: {e}")
             texts.append("[合并转发]")
+    return texts
 
-    full = "\n".join(t for t in texts if t)
-    return QuoteInfo(images=images, text=full[: config.QUOTE_MAX_CHARS], failed=False, image_segments=image_segments,
-                     forward=is_forward or bool(forward_ids))
+
+async def forward_text(message, bot=None) -> str:
+    """群友直接发的合并转发（不是引用）：展开成几行「谁: 说了什么」；消息里没有转发就返回空串。"""
+    inline_nodes: list = []
+    forward_ids: list = []
+    for stype, sdata in _iter_segments(message):
+        if stype != "forward":
+            continue
+        inline = sdata.get("content")
+        if isinstance(inline, list) and inline:
+            inline_nodes.extend(inline)
+        elif sdata.get("id"):
+            forward_ids.append(str(sdata.get("id")))
+    if not inline_nodes and not forward_ids:
+        return ""
+    return "\n".join(await _expand_forwards(inline_nodes, forward_ids, bot))[: config.QUOTE_MAX_CHARS]
 
 
 def _forward_lines(nodes) -> list[str]:
@@ -289,9 +311,12 @@ def _extract_text(message) -> str:
             continue
         last = stype
         if stype in ("json", "share"):
-            parts.append(_card_text(sdata))
+            card = _multimsg_text(sdata) if stype == "json" else None
+            parts.append(card if card is not None else _card_text(sdata))
         elif stype == "record":
             parts.append("[语音]")
+        elif stype == "forward":
+            parts.append("[合并转发]")
     return "\n".join(parts)[: config.QUOTE_MAX_CHARS]
 
 

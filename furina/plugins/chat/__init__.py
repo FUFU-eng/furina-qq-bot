@@ -10,7 +10,8 @@ from nonebot.plugin import PluginMetadata
 
 from . import digest, history, ownlife, presence, proactive, seek, tts  # noqa: F401  注册启动/连接钩子
 from .handlers import handle_chat, handle_group_increase, handle_poke, handle_summary
-from .matchers import _chat, _join, _poke, _summary
+from . import kernel  # noqa: F401  二代仿真 / Agent 内核（注册回调接口）
+from .matchers import _agent_private, _chat, _join, _poke, _summary
 
 __plugin_meta__ = PluginMetadata(
     name="AI 聊天",
@@ -37,3 +38,8 @@ async def _poke_entry(event):
 @_join.handle()
 async def _join_entry(event):
     await handle_group_increase(event)
+
+
+@_agent_private.handle()
+async def _agent_private_entry(bot, event):
+    await kernel.run_agent(bot, str(event.user_id), event.get_plaintext().strip())

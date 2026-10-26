@@ -42,6 +42,71 @@ def _hm(ts):
         return ""
 
 
+_GRAY = "<span style='color:#8193b2'>{}</span>"
+
+
+def _annoy_color(v):
+    return "#ef4444" if v >= 60 else "#ffb347" if v >= 35 else "#ffd166" if v >= 15 else "#3ecf8e"
+
+
+def _inner_html(inner, now=None):
+    """心情一行 + 烦躁值（群里整体 + 对谁烦、为什么）。"""
+    mv = int(inner.get("mood") or 0)
+    out = [f"心情 <b style='color:#6ad4ff'>{_E(str(inner.get('mood_label') or ''))}</b> {mv}/100"
+           + (f"　{_E('、'.join(inner['feelings']))}" if inner.get("feelings") else "")]
+    if inner.get("mood_reason"):
+        out.append(_GRAY.format("　因为：" + _E(inner["mood_reason"])))
+    a = inner.get("annoy") or {}
+    if not a.get("enabled"):
+        out.append(_GRAY.format("烦躁值关着（设置里能开）"))
+        return "<br>".join(out)
+    g = float(a.get("global") or 0)
+    out.append(f"群里吵不吵 <b style='color:{_annoy_color(g)}'>{_E(a.get('global_band') or '还好')}</b> {g:.0f}/100")
+    users = [u for u in a.get("users") or [] if float(u.get("level") or 0) >= 5]
+    for u in users[:5]:
+        v = float(u.get("level") or 0)
+        out.append(f"对 <b>{_E(str(u.get('name') or ''))}</b> <b style='color:{_annoy_color(v)}'>{_E(u.get('band') or '还行')}</b> {v:.0f}"
+                   + (_GRAY.format("　" + _E(str(u.get("why") or ""))) if u.get("why") else ""))
+    if not users:
+        out.append(_GRAY.format("谁也没惹她，心平气和"))
+    return "<br>".join(out)
+
+
+def _taste_html(t, now=None):
+    if not t.get("enabled"):
+        return _GRAY.format("口味记录关着（B站设置里能开）")
+    out = []
+    for key, name, col in (("likes", "在迷", "#fb7299"), ("bored", "看腻了", "#ffd166"), ("dislikes", "不爱看", "#8193b2")):
+        items = t.get(key) or []
+        if items:
+            out.append(f"<span style='color:{col}'>{name}</span>　" + "、".join(
+                _E(("UP主 " if x.get("kind") == "up" else "") + str(x.get("term") or "")) for x in items[:6]))
+    ops = t.get("opinions") or []
+    if ops:
+        o = ops[0]
+        out.append(_GRAY.format(f"最近记住的：{_ago(o.get('ts'), now)}{'很喜欢' if o.get('love') else '不喜欢'}《"
+                                + _E(str(o.get('title') or ''))[:30] + "》"
+                                + (("：" + _E(str(o.get("thought") or ""))[:40]) if o.get("thought") else "")))
+    return "<br>".join(out) or _GRAY.format("还没形成口味：多刷几轮，她喜欢什么、腻了什么会慢慢显出来")
+
+
+def _livestream_html(ls):
+    if not ls.get("enabled"):
+        return ""
+    if ls.get("error"):
+        state = f"<b style='color:#ff6b6b'>直播没法上场</b>　{_E(ls['error'])}"
+    elif ls.get("live"):
+        s = ls.get("stats") or {}
+        state = (f"<b style='color:#fb7299'>🎙 正在直播</b>" + ("（闭麦中）" if ls.get("muted") else "")
+                 + f"　弹幕 {int(s.get('danmaku') or 0)} · 她回了 {int(s.get('replies') or 0)} 次 · 挡掉 {int(s.get('blocked') or 0)}"
+                 + ("" if ls.get("stage_clients") else "　<span style='color:#ffd166'>直播姬里没加舞台画面</span>")
+                 + (f"<br><span style='color:#8193b2'>刚说：{_E(ls['last_line'])[:60]}</span>" if ls.get("last_line") else ""))
+    else:
+        state = "<b style='color:#8193b2'>🎙 等你开播</b>　在直播姬里点开始直播，她半分钟内上场"
+    return (f"<br><br>{state}<br><span style='color:#8193b2'>直播姬素材地址：</span>"
+            f"<span style='color:#6ad4ff'>{_E(ls.get('stage_url') or '')}</span>")
+
+
 class BiliPageMixin:
     def _build_bili_page(self):
         page = QWidget()
@@ -81,6 +146,13 @@ class BiliPageMixin:
 
         self.bili_live = self._bili_box("此刻", min_h=86)
         layout.addWidget(self.bili_live[0])
+        inner = QHBoxLayout()
+        inner.setSpacing(12)
+        self.bili_inner = self._bili_box("她此刻的心情和烦躁", min_h=70)
+        self.bili_taste = self._bili_box("她的口味（看得越多越会变）", min_h=70)
+        inner.addWidget(self.bili_inner[0], 1)
+        inner.addWidget(self.bili_taste[0], 1)
+        layout.addLayout(inner)
         self.bili_stats = QLabel()
         self.bili_stats.setTextFormat(Qt.RichText)
         self.bili_stats.setStyleSheet("background:transparent;")
@@ -191,7 +263,10 @@ class BiliPageMixin:
             live = ("<b style='color:#8193b2'>💤 没在刷</b>　" +
                     (f"上次 {_ago(last.get('ts'), now)} 看了《{_E(last.get('title') or '')}》" if last else "还没刷过视频") +
                     "<br><span style='color:#8193b2'>点「刷一下」让她现在就去；输入关键词可以指定她搜什么。</span>")
-        self.bili_live[1].setText(live + req)
+        self.bili_live[1].setText(live + req + _livestream_html(d.get("livestream") or {}))
+
+        self.bili_inner[1].setText(_inner_html(d.get("inner") or {}, now))
+        self.bili_taste[1].setText(_taste_html(d.get("taste") or {}, now))
 
         t, c = st.get("today") or {}, d.get("caps") or {}
         cells = [

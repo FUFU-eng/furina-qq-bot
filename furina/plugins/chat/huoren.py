@@ -40,6 +40,9 @@ RULES = """【像真人一样聊天】你是群里一个有自己生活的普通
 - 会接梗、玩梗、吐槽，会顺口说自己正在干嘛、最近刷到了什么、今天吃了啥，像朋友分享日常那样随口一提。
 - 对方说什么你先接住他这句话本身，别急着总结、讲道理或给建议；只有对方真在问问题时才认真答。
 - 说人话：口语、短句、有语气，像手机上随手打出来的字。
+- 人味（按 10 万条真人评论量出来的）：拿不准就说「好像」「应该」「感觉」「可能」，别句句下结论；吐槽可以夸张一点（「根本」「简直」「贼」「巨」）。
+- 不用破折号；「不是…而是…」「最…的是」「先…再…」「三段并列」这种句式真人很少用，一轮最多一个，别轮换着用。
+- 「吧」只挂在提建议、让人做事的句子后面（「先这样吧」），陈述句后面别挂（不说「我刚吃完饭吧」）。
 - 别句句都抛问题给对方：多用陈述句说自己的反应和看法，真想知道才问，一轮最多问一句。
 - 同一个话题你已经提过两次了就放下，别反复绕回去；对方没接的梗也别硬接着玩。
 - 别随口答应「到点叫你」「八点提醒你」这种事：聊天时你记不住闹钟，答应了就是放鸽子。真要定，让 TA 直接跟你说「几点提醒我干嘛」。
@@ -76,14 +79,15 @@ def life_note(now: float | None = None) -> str:
     return ""
 
 
-def bili_note(now: float | None = None) -> str:
+def bili_note(now: float | None = None, context_text: str = "") -> str:
     try:
         items = bili_store.recent_watched(hours=36, limit=3, now=now)
         posts = bili_store.recent_posts(hours=36, limit=2, now=now)
     except Exception:
         return ""
+    tail = _taste_tail(context_text, now)
     if not items and not posts:
-        return ""
+        return tail.strip()
     lines = []
     for it in items:
         ago = _ago(it.get("ts"), now)
@@ -95,7 +99,24 @@ def bili_note(now: float | None = None) -> str:
         where = f"在《{p.get('title', '')[:30]}》下面" if p.get("title") else ""
         lines.append(f"- {_ago(p.get('ts'), now)}你{where}发了条{kind}：{p.get('text', '')[:50]}")
     return ("【你最近在 B 站的经历（这是你自己的真实经历：聊到相关话题时可以像分享日常一样自然提一句，"
-            "比如「我昨天刚刷到个…」；没聊到就别硬塞，也不要一次全说出来）】\n" + "\n".join(lines))
+            "比如「我昨天刚刷到个…」；没聊到就别硬塞，也不要一次全说出来）】\n" + "\n".join(lines) + tail)
+
+
+def _taste_tail(context_text: str, now: float | None = None) -> str:
+    """她刷出来的口味 + 和眼下话题对得上的旧看法（本地拼，零 token）。"""
+    try:
+        from ...services.bilibili import taste
+
+        out = []
+        tl = taste.taste_line(now)
+        if tl:
+            out.append(f"\n【你在 B 站刷出来的口味（会慢慢变）】{tl}。聊到相关的可以有自己的偏好和吐槽，不用特意提。")
+        seen = taste.recall(context_text, limit=2, now=now)
+        if seen:
+            out.append("\n【大家聊的东西你刷到过】" + "；".join(seen) + "。想说就自然带一句，别硬塞。")
+        return "".join(out)
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _ago(ts, now: float | None = None) -> str:
@@ -174,6 +195,9 @@ def slang_note(group_id, context_text: str = "", rng: random.Random | None = Non
         _txt = (_recent_text(group_id) + "\n" + (context_text or ""))[-1500:]
         found = slang.find_in(_txt, limit=5)
         parts.extend(slang.hot_notes(_txt))  # 最近巨火的事物（大肥鱼…）：聊到才讲来龙去脉
+        _cb = slang.callback_note(context_text or "")  # 群友喊口令 / 说上半句：按梗接（申请起飞 → 允许起飞）
+        if _cb:
+            parts.insert(0, _cb)
         if found:
             parts.append("【群友刚才说的话里有这些网络用语，意思是】" + "；".join(f"{t}：{m}" for t, m in found)
                          + "（看懂就行，不用解释给别人听）")
@@ -223,7 +247,7 @@ def build_note(group_id, now: float | None = None, context_text: str = "") -> st
         life = life_note(now)
         if life:
             parts.append(life)
-        bili = bili_note(now)
+        bili = bili_note(now, context_text)
         if bili:
             parts.append(bili)
         if config.STYLE_LINES:

@@ -319,6 +319,25 @@ def delete_settings(gid, target: str, value: str = "") -> tuple[int, list[str]]:
     return len(deleted), deleted
 
 
+def delete_by_value(gid, *candidates: str) -> tuple[int, list[str]]:
+    """只说了要删的内容、没说是谁的（「删除ntr苦主，铸币」）：按内容找设定删。
+
+    候选从长到短试，第一个能对上的就删掉对上的那些：内容完全一样，或者候选至少 4 个字且是内容的一部分
+    （太短的词只认完全一样，免得「删除张三」误删别人设定里提到张三的那条）。都对不上返回 (0, [])。"""
+    cands = sorted({(c or "").strip().strip(" ，,。：:、") for c in candidates if c}, key=len, reverse=True)
+    cands = [c for c in cands if len(c) >= 2]
+    with _lock:
+        g = _group(gid)
+        for c in cands:
+            hit = [f for f in g["facts"] if (fv := _fact_target(f.get("fact", ""))[1])
+                   and (c == fv or (len(c) >= 4 and c in fv))]
+            if hit:
+                g["facts"] = [f for f in g["facts"] if f not in hit]
+                _save()
+                return len(hit), [f.get("fact", "") for f in hit]
+    return 0, []
+
+
 def query_settings(gid, target: str) -> tuple[list[str], list[str]]:
     """查询目标的词条与外号，返回 (词条列表, 外号描述列表)。"""
     target = resolve_target(gid, target)
