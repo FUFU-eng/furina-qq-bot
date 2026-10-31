@@ -1,0 +1,6 @@
+[project]
+name = "furinasign"
+version = "1.0.0"
+description = "芙宁娜米游社签到战报：汇总 GenshinUID / StarRailUID / ZZZeroUID / BBBUID 的自动签到结果，在群里发送一张总结卡片"
+authors = [{ name = "furina-qq-bot" }]
+dependencies = []

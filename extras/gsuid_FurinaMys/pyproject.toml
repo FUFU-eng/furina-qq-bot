@@ -2,5 +2,5 @@
 name = "furinamys"
 version = "1.0.0"
 description = "芙宁娜米游社助手：@机器人 触发的精简指令（扫码绑定 / 每日 / 面板 / 攻略 / 深渊 / 今日素材 / 更新展柜 / 指令帮助），查询全部委托给 GenshinUID / StarRailUID / ZZZeroUID / BBBUID"
-authors = [{ name = "qq-bot-v2" }]
+authors = [{ name = "furina-qq-bot" }]
 dependencies = []
