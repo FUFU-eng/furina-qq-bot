@@ -1,6 +1,7 @@
 """功能列表 / 指令大全 / 日志页的界面搭建（PanelWindow 的 mixin，由 window.py 拆出）。"""
 from ..common import *  # noqa: F401,F403
 from ..widgets import *  # noqa: F401,F403
+from panel.services.logs import transport_name
 
 
 class InfoPagesMixin:
@@ -13,6 +14,14 @@ class InfoPagesMixin:
         outer.setSpacing(14)
 
         groups = [
+            ("芙宁娜专属特权 · 全权电脑掌控", [
+                ("七分傲三分娇 · 抖S反杀", "融合原版芙宁娜的戏剧张力与群友活人感，遇到开黄腔/互损直接高傲毒舌反杀，绝不冷落拒聊，回复条数完全自由", "人设"),
+                ("查岗主人桌面", "群友起哄或芙芙好奇时，静默查看主人当前打开的窗口/游戏并截桌面图发群里吐槽（自动过滤密码与隐私窗口）", "查岗"),
+                ("抖S「记小本本」", "给顶嘴或出糗的群友起绰号、记黑历史，随时翻旧账嘲笑 · 角色管理 → 📕 芙芙的小本本", "小本本"),
+                ("余额救急自动截图", "接口真没钱（402）时自动截 DeepSeek 充值页图发群里并 @主人 撒娇喊充钱", "救急"),
+                ("全权操作电脑 & 画图截网页", "群聊/私聊随时翻 Eagle 足迹图库、截任意网页、手绘图片、执行电脑命令与收发本地文件", "全权"),
+                ("角色人设热更新", "在「角色管理」页修改或同步提示词后点击保存，无需重启，下一条消息立即生效", "热更新"),
+            ]),
             ("AI 智能", [
                 ("AI 聊天", "群聊接话 · 艾特回复 · 多轮话题锁定与记忆系统", "聊天"),
                 ("群聊总结", "引用消息或自然语言触发，汇总最近群聊", "总结"),
@@ -29,6 +38,7 @@ class InfoPagesMixin:
             ]),
             ("语音", [
                 ("语音消息", "芙宁娜的声音（本机 GPT-SoVITS）· 神气 / 日常 / 傲娇 / 平静四种语气按情境换", "语音"),
+                ("高傲语音反击", "打出「哼、杂鱼、就这、才没有、小蛋糕、充钱」等抖S反杀或撒娇台词时语音触发率大幅提升并自动唤醒引擎", "反杀"),
                 ("省内存", "只在要发语音时开引擎、闲置 10 分钟关；打游戏或内存紧张时自动让路", "省内存"),
             ]),
             ("B站生活", [
@@ -102,8 +112,8 @@ class InfoPagesMixin:
         page = QWidget()
         page.setObjectName("stackPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(6, 4, 6, 4)
-        layout.setSpacing(10)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
 
         command_groups = [
             ("GsCore", "官方游戏服务", "#82d6cf", "", []),
@@ -234,11 +244,9 @@ class InfoPagesMixin:
         head = QHBoxLayout()
         title_box = QVBoxLayout()
         title_box.setSpacing(2)
-        t = QLabel("指令大全")
-        t.setObjectName("pageTitleLabel")
-        s = QLabel("群聊全功能触发口令速查手册 · 点击右侧蓝色口令胶囊即可一键复制")
+        # 页标题由窗口统一显示，这里只留一句说明
+        s = QLabel("没有特别标注的指令都要先 @芙芙 · 点右侧的口令可以直接复制")
         s.setObjectName("pageSubLabel")
-        title_box.addWidget(t)
         title_box.addWidget(s)
         head.addLayout(title_box)
         head.addStretch(1)
@@ -350,10 +358,11 @@ class InfoPagesMixin:
                 title_line.setSpacing(8)
                 nl = QLabel(name)
                 nl.setObjectName("featName")
-                trig = QLabel(trigger_mode)
-                trig.setObjectName("cmdTriggerTag")
                 title_line.addWidget(nl)
-                title_line.addWidget(trig)
+                if trigger_mode and trigger_mode != "需 @机器人":  # 「需 @机器人」是默认情况，页顶已说明，不再每行重复
+                    trig = QLabel(trigger_mode)
+                    trig.setObjectName("cmdTriggerTag")
+                    title_line.addWidget(trig)
                 title_line.addStretch(1)
 
                 dl = QLabel(desc)
@@ -480,15 +489,16 @@ class InfoPagesMixin:
         log_layout.addWidget(self.log_text, 1)
         layout.addWidget(log_surface, 3)
 
-        # NapCat 日志独立卡片：排查掉线 / 登录态 / 收发报文，和上方机器人日志上下对照
+        # 当前 QQ 接入端日志独立卡片：和上方机器人日志上下对照
         napcat_surface = QFrame()
         napcat_surface.setObjectName("logSurface")
         napcat_layout = QVBoxLayout(napcat_surface)
         napcat_layout.setContentsMargins(10, 8, 10, 10)
         napcat_layout.setSpacing(6)
         nap_head = QHBoxLayout()
-        nap_head.addWidget(self._label("NapCat 日志 · 掉线 / 登录 / 收发报文", "sectionLabel", 11), 1)
-        self.napcat_status = self._label("NapCat 重启后开始记录", "surfaceHint", 10)
+        active_transport = transport_name()
+        nap_head.addWidget(self._label(f"{active_transport} 日志 · 连接 / 登录 / 收发报文", "sectionLabel", 11), 1)
+        self.napcat_status = self._label(f"等待 {active_transport} 日志…", "surfaceHint", 10)
         nap_head.addWidget(self.napcat_status, 0, Qt.AlignVCenter)
         napcat_layout.addLayout(nap_head)
         self.napcat_text = QPlainTextEdit()

@@ -1,6 +1,7 @@
 """日志读取与显示（PanelWindow 的 mixin，由 window.py 拆出）。"""
 from ..common import *  # noqa: F401,F403
 from ..widgets import *  # noqa: F401,F403
+from panel.services.logs import latest_transport_log, transport_name
 
 
 class LogsMixin:
@@ -70,16 +71,10 @@ class LogsMixin:
         self._refresh_napcat_log()
 
     def _find_napcat_log(self):
-        """NapCat 文件日志目录下最新的 .log（文件名可能按日期 / QQ 变化，自动跟随）。"""
+        """Backward-compatible helper for the latest active QQ transport log."""
         try:
-            files = [
-                os.path.join(NAPCAT_LOG_DIR, x)
-                for x in os.listdir(NAPCAT_LOG_DIR)
-                if x.lower().endswith(".log")
-            ]
-            if not files:
-                return None
-            return max(files, key=lambda p: os.path.getmtime(p))
+            path = latest_transport_log()
+            return str(path) if path else None
         except Exception:
             return None
 
@@ -92,7 +87,9 @@ class LogsMixin:
             self._napcat_found = self._find_napcat_log()
         path = getattr(self, "_napcat_found", None)
         if not path:
-            return  # NapCat 还没开文件日志 / 未重启，保持提示文案
+            if hasattr(self, "napcat_status"):
+                self.napcat_status.setText(f"等待 {transport_name()} 日志文件")
+            return
         if path != getattr(self, "_napcat_log_path", None):
             self._napcat_log_path = path
             try:  # 跨天 / 重启换文件：只先读尾部一小段

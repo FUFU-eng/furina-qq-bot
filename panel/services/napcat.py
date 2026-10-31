@@ -11,7 +11,8 @@ import threading
 import time
 from pathlib import Path
 
-from . import envfile, health, winproc
+from furina.core import qq_transport as transport_settings
+from . import envfile, health, qq_transport as transport, winproc
 
 QR_MAX_AGE = 150  # NapCat 二维码约 2 分钟过期，超过这个时间没更新就是作废的码
 
@@ -22,6 +23,8 @@ def napcat_dir() -> Path | None:
 
 
 def webui_port() -> int:
+    if transport_settings.uses_snowluma():
+        return transport_settings.webui_port()
     try:
         return int(envfile.get("NAPCAT_WEBUI_PORT", "6099"))
     except ValueError:
@@ -29,6 +32,8 @@ def webui_port() -> int:
 
 
 def qrcode_path() -> Path | None:
+    if transport_settings.uses_snowluma():
+        return None  # SnowLuma QQ login/Load is managed in its authenticated local WebUI.
     d = napcat_dir()
     return d / "cache" / "qrcode.png" if d else None
 
@@ -42,12 +47,16 @@ def qr_age(now: float | None = None) -> float | None:
 
 
 def log_dir() -> Path | None:
+    if transport_settings.uses_snowluma():
+        return transport.log_dir()
     d = napcat_dir()
     return d / "logs" if d else None
 
 
 def webui_url() -> str:
-    """.env 的 NAPCAT_WEBUI_URL 优先；否则按 NapCat 自己的 webui.json 拼出（只读，不改 NapCat 配置）。"""
+    """Open the selected local QQ transport WebUI; SnowLuma remains loopback-only."""
+    if transport_settings.uses_snowluma():
+        return transport.open_url()
     url = envfile.get("NAPCAT_WEBUI_URL", "")
     if url:
         return url
@@ -70,6 +79,8 @@ def _boot_exe() -> str:
 
 
 def is_running() -> bool:
+    if transport_settings.uses_snowluma():
+        return transport.running()
     if winproc.port_open(webui_port()):
         return True
     exe = _boot_exe()
@@ -82,7 +93,9 @@ def is_running() -> bool:
 
 
 def start(qq: str | None) -> subprocess.Popen | None:
-    """用 launcher-user.bat 启动；qq 为空时不带快速登录参数（会直接生成新二维码）。"""
+    """Start the configured local QQ transport. SnowLuma never auto-selects or logs in a QQ account."""
+    if transport_settings.uses_snowluma():
+        return transport.start()
     d = napcat_dir()
     if not d or not winproc.IS_WIN:
         raise RuntimeError("没有配置 NAPCAT_DIR，无法启动 NapCat")
@@ -92,7 +105,10 @@ def start(qq: str | None) -> subprocess.Popen | None:
 
 
 def stop() -> None:
-    """只结束本安装目录的 NapCatWinBootMain 及其 launcher cmd，不碰用户自己开的 QQ。"""
+    """Stop only the configured local transport. SnowLuma unloads injected QQ hooks before its own process exits."""
+    if transport_settings.uses_snowluma():
+        transport.stop()
+        return
     exe = _boot_exe()
     if not exe:
         return
@@ -111,7 +127,12 @@ def stop() -> None:
 
 
 def ensure_onebot_config(qq: str) -> bool:
-    """为该 QQ 生成 OneBot 配置（反向 WS 连机器人 + 本机 HTTP 给面板用）；已有且可用则不动。"""
+    """Ensure the active local OneBot adapter config without changing an existing transport."""
+    if transport_settings.uses_snowluma():
+        before = transport_settings.runtime_dir() / "config" / "onebot.json"
+        prior = before.read_bytes() if before.exists() else b""
+        transport_settings.write_snowluma_onebot_config()
+        return not prior or before.read_bytes() != prior
     d = napcat_dir()
     if not d:
         return False
@@ -156,6 +177,7 @@ class GroupCache:
     def __init__(self):
         self._groups: dict[str, str] = {}
         self._ts = 0.0
+        self._provider = transport_settings.provider()
         self._inflight = False
         self._lock = threading.Lock()
 
@@ -169,17 +191,23 @@ class GroupCache:
             self._groups, self._ts = {}, 0.0
 
     def refresh(self, force: bool = False) -> None:
+        provider = transport_settings.provider()
         with self._lock:
+            if provider != self._provider:
+                self._groups = {}
+                self._ts = 0.0
+                self._provider = provider
             if self._inflight or (not force and time.time() - self._ts < 15):
                 return
             self._inflight = True
-        threading.Thread(target=self._work, daemon=True).start()
+        threading.Thread(target=self._work, args=(provider,), daemon=True).start()
 
     def refresh_sync(self) -> dict[str, str]:
-        self._work()
+        self._work(transport_settings.provider())
         return self.get()
 
-    def _work(self) -> None:
+    def _work(self, provider: str | None = None) -> None:
+        provider = provider or transport_settings.provider()
         result: dict[str, str] = {}
         try:
             data = health.call("get_group_list", timeout=2)

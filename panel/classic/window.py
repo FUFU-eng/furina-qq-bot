@@ -23,6 +23,7 @@ from .pages.bili import BiliPageMixin
 from .pages.spend import SpendPageMixin
 from .pages.usage_rank import UsageRankPageMixin
 from .pages.pics import PicsPageMixin
+from PySide6.QtWidgets import QScrollArea
 
 
 class _EdgeHandle(QWidget):
@@ -653,6 +654,18 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
         home_header_layout.addLayout(status_row)
         detail_layout.addWidget(self.home_header)
 
+        # 功能页统一的页标题（主页和游戏管理页不显示）；页面自己的说明和操作按钮紧跟在下面
+        self.page_header = QWidget()
+        ph = QHBoxLayout(self.page_header)
+        ph.setContentsMargins(2, 6, 0, 12)
+        ph.setSpacing(10)
+        self.page_heading = QLabel("")
+        self.page_heading.setObjectName("pageHeading")
+        ph.addWidget(self.page_heading)
+        ph.addStretch(1)
+        self.page_header.hide()
+        detail_layout.addWidget(self.page_header)
+
         self.stack = QStackedWidget()
         self.stack.setObjectName("stack")
         self.stack.addWidget(self._build_home_page())
@@ -666,14 +679,14 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
         self.game_management_page = GameManagementPage(self)
         self.stack.addWidget(self.game_management_page)
         try:  # B站生活：读库出错也不影响其它页
-            self.stack.addWidget(self._build_bili_page())
+            self.stack.addWidget(self._scroll_page(self._build_bili_page()))
         except Exception as exc:  # noqa: BLE001
             fallback = QWidget()
             fallback.setObjectName("stackPage")
             QVBoxLayout(fallback).addWidget(self._label(f"B站生活页加载失败：{exc}", "pageSubLabel", 11))
             self.stack.addWidget(fallback)
         try:  # 模型花费：读不到也不影响其它页
-            self.stack.addWidget(self._build_spend_page())
+            self.stack.addWidget(self._scroll_page(self._build_spend_page()))
         except Exception as exc:  # noqa: BLE001
             fallback = QWidget()
             fallback.setObjectName("stackPage")
@@ -714,6 +727,27 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
         root_layout.addWidget(detail)
         self.add_log("info", "[系统] 芙宁娜控制面板已启动")
         return panel
+
+    def _scroll_page(self, page):
+        """内容比窗口高的页面：整页滚动，卡片按内容自然撑开（不再在每张卡片里塞一个小滚动框）。"""
+        scroll = QScrollArea()
+        scroll.setObjectName("pageScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        page.setContentsMargins(0, 0, 10, 0)
+        scroll.setWidget(page)
+        return scroll
+
+    def _update_page_header(self, index):
+        header = getattr(self, "page_header", None)
+        if header is None:
+            return
+        kind = self.rail_kinds[index] if 0 <= index < len(self.rail_kinds) else ""
+        show = kind not in ("", "home", "games")
+        if show:
+            self.page_heading.setText(self.rail_names[index])
+        header.setVisible(show)
 
     def _refresh_rail_icons(self):
         """侧栏图标统一灰蓝，只有当前页是亮蓝。"""
@@ -771,16 +805,24 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
         is_home = index == 0
         is_games = 0 <= index < len(self.rail_kinds) and self.rail_kinds[index] == "games"
         # Apply before the home/non-home cache: switching between two feature tabs also matters.
-        self.detail_panel.layout().setContentsMargins(*( (6, 6, 6, 6) if is_games else (22, 26, 18, 20) ))
-        self.title_bar.setFixedHeight(52 if is_games else 74)
-        self.title_layout.setContentsMargins(24 if self.sidebar_collapsed else 18, 8 if is_games else 18, 10, 0)
+        if is_games:
+            margins = (6, 6, 6, 6)
+        elif is_home:
+            margins = (22, 26, 18, 20)
+        else:
+            margins = (32, 4, 30, 22)
+        self.detail_panel.layout().setContentsMargins(*margins)
+        self.title_bar.setFixedHeight(74 if is_home else 52)
+        self.title_layout.setContentsMargins(24 if self.sidebar_collapsed else 18, 18 if is_home else 8, 10, 0)
+        self._update_page_header(index)
         self._update_sidebar_top_fill()
         self._active_tab = index
         mode = "home" if is_home else ("games" if is_games else "feature")
         if not force and self._page_mode_home == mode:
             return
         self._page_mode_home = mode
-        self._set_wallpaper_paused(is_games)
+        # 壁纸只在主页显示；其它页面实色底，顺便暂停动态壁纸省 CPU/GPU
+        self._set_wallpaper_paused(not is_home)
         if is_home:
             # 布局完全不动：工作区仍固定 600/454，卡片/按钮尺寸位置不变；
             # 仅让底层壁纸铺满侧边栏右侧，art 不再画自己那半张立绘（只留启动按钮）。
@@ -812,20 +854,15 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
             self.left_panel.setMaximumWidth(16777215)
             # 整页不透明纯色（样式见 _PAGE_MODE_SHEETS）
         else:
+            # 功能页：实色底，不再把壁纸垫在内容下面（半透明叠壁纸会让文字难读、各页颜色也不一致）
             self.art.hide()
             if hasattr(self, "bg_layer"):
-                if self.bg_layer.is_active:
-                    self.bg_layer.show()
-                else:
-                    self.bg_layer.set_fallback_background(BACKDROP_FILES[self.bg_index])
-                self._layout_background()
-            # 功能页右侧标题栏与内容区使用同一层级的轻微透明遮罩；左侧仍由 sidebarTopFill 保持深色。
+                self.bg_layer.hide()
             self.home_header.setVisible(False)
             self.home_footer.setVisible(False)
             self.left_panel.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.left_panel.setMinimumWidth(0)
             self.left_panel.setMaximumWidth(16777215)
-            # 整个功能页统一铺设半透明深色遮罩，而不是只在顶部露出一条背景（样式见 _PAGE_MODE_SHEETS）。
         self._set_page_mode_style(mode)
         self.left_panel.updateGeometry()
         self.stack.updateGeometry()
@@ -836,22 +873,19 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
     # 重新解析样式，一次 60ms 以上、切页卡 0.3 秒；现在只改属性并重刷这 4 个控件本身。
     _PAGE_MODE_SHEETS = {
         "window_body": (
-            'QWidget#windowBody[pageMode="home"], QWidget#windowBody[pageMode="feature"] { background: transparent; border-radius: 16px; }\n'
-            'QWidget#windowBody[pageMode="games"] { background: #0e1626; border-radius: 16px; }'
+            'QWidget#windowBody[pageMode="home"] { background: transparent; border-radius: 16px; }\n'
+            'QWidget#windowBody[pageMode="games"], QWidget#windowBody[pageMode="feature"] { background: #0d1524; border-radius: 16px; }'
         ),
         "detail_panel": (
             '#detailPanel[pageMode="home"] { background: transparent; }\n'
-            '#detailPanel[pageMode="games"] { background: #0e1626; border: none; border-bottom-right-radius: 16px; }\n'
-            '#detailPanel[pageMode="feature"] { background: rgba(10,18,32,0.72); border-right: 1px solid rgba(255,255,255,0.08); border-bottom-right-radius: 16px; }'
+            '#detailPanel[pageMode="games"], #detailPanel[pageMode="feature"] { background: #0d1524; border: none; border-bottom-right-radius: 16px; }'
         ),
         "stack": (
             '#stack[pageMode="home"] { background: transparent; }\n'
-            '#stack[pageMode="games"] { background: #0e1626; border: none; }\n'
-            '#stack[pageMode="feature"] { background: rgba(15,23,42,0.22); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; }'
+            '#stack[pageMode="games"], #stack[pageMode="feature"] { background: transparent; border: none; }'
         ),
         "title_bar": (
-            '#titleBar[pageMode="games"] { background: #0e1626; border-top-right-radius: 16px; }\n'
-            '#titleBar[pageMode="feature"] { background: rgba(15,23,42,0.70); border-top-right-radius: 16px; }'
+            '#titleBar[pageMode="games"], #titleBar[pageMode="feature"] { background: #0d1524; border-top-right-radius: 16px; }'
         ),
     }
 
@@ -1025,119 +1059,129 @@ class PanelWindow(WallpaperMixin, HomePageMixin, PermissionsPageMixin, InfoPages
             self.add_log("error", f"[错误] 复制失败: {e}")
 
     def _qss(self):
+        # 全局样式：颜色全部取自 theme.py（实色表面 + 单一强调色），选择器名字与各页面保持不变。
         return f"""
-        QWidget {{ background: transparent; color: {COLOR_TEXT}; font-family: "Microsoft YaHei"; }}
+        QWidget {{ background: transparent; color: {COLOR_TEXT}; font-family: "Microsoft YaHei UI", "Microsoft YaHei"; }}
+        QToolTip {{ background: {SURFACE_RAISED}; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_STRONG}; padding: 6px 8px; border-radius: 6px; }}
         #titleBar {{ background: transparent; border: none; }}
-        #brandIcon {{ background: {COLOR_GOLD}; color: #0a0f2d; border-radius: 14px; font-weight: bold; font-size: 15px; }}
-        #titleText {{ color: rgba(255,255,255,0.82); font-size: 13px; }}
-        #winBtn, #closeBtn {{ background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.85); border: 1px solid rgba(255,255,255,0.10); border-radius: 8px; font-size: 16px; }}
-        #winBtn:hover, #closeBtn:hover {{ background: #e81123; color: white; border-color: #e81123; }}
-        #winBtn:pressed, #closeBtn:pressed {{ background: #bf0f1d; color: white; border-color: #bf0f1d; }}
-        #windowBody {{ background: #0f172a; border-radius: 16px; }}
-        #leftRail {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #0d1b3d, stop:1 #091329); border-right: 1px solid rgba(140,180,255,0.10); border-bottom-left-radius: 16px; }}
-        #navGroup {{ color: #5f7396; font-size: 11px; padding: 12px 12px 4px 12px; }}
-        #navItem {{ background: transparent; color: #a3b3cc; border: none; border-radius: 10px; padding: 8px 12px; text-align: left; font-size: 14px; }}
-        #navItem:hover {{ background: rgba(255,255,255,0.06); color: #eef3ff; }}
-        #navItem:checked {{ background: rgba(106,212,255,0.15); color: #ffffff; font-weight: bold; }}
-        #railCard {{ background: rgba(255,255,255,0.045); border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }}
+        #brandIcon {{ background: transparent; border-radius: 10px; }}
+        #titleText {{ color: {TEXT_SECONDARY}; font-size: 13px; font-weight: bold; letter-spacing: 1px; }}
+        #winBtn, #closeBtn {{ background: transparent; color: {TEXT_SECONDARY}; border: none; border-radius: 8px; font-size: 15px; }}
+        #winBtn:hover {{ background: rgba(255,255,255,0.08); color: #ffffff; }}
+        #winBtn:pressed {{ background: rgba(255,255,255,0.14); }}
+        #closeBtn:hover {{ background: #e81123; color: white; }}
+        #closeBtn:pressed {{ background: #bf0f1d; color: white; }}
+        #windowBody {{ background: {APP_BG}; border-radius: 16px; }}
+        #leftRail {{ background: {RAIL_BG}; border-right: 1px solid {BORDER}; border-bottom-left-radius: 16px; }}
+        #navGroup {{ color: {TEXT_HINT}; font-size: 11px; font-weight: bold; padding: 14px 12px 4px 12px; }}
+        #navItem {{ background: transparent; color: #a9b6c9; border: none; border-radius: 8px; padding: 8px 12px; text-align: left; font-size: 14px; }}
+        #navItem:hover {{ background: rgba(255,255,255,0.05); color: {TEXT_PRIMARY}; }}
+        #navItem:checked {{ background: {ACCENT_SOFT}; color: #ffffff; font-weight: bold; }}
+        #railCard {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 10px; }}
         #railCard[collapsed="true"] {{ background: transparent; border: none; }}
-        #railStatusText {{ color: #c9d6ea; font-size: 12px; }}
+        #railStatusText {{ color: {TEXT_BODY}; font-size: 12px; }}
         #collapseBtn {{ background: transparent; border: none; border-radius: 8px; }}
         #collapseBtn:hover {{ background: rgba(255,255,255,0.08); }}
-        #sidebarTopFill {{ background: #0d1b3d; border-top-left-radius: 16px; }}
-        #detailPanel {{ background: transparent; border-right: 1px solid rgba(255,255,255,0.07); }}
-        #pageSubLabel {{ color: #91a2bc; font-size: 12px; }}
-        #pageTitleLabel {{ color: #f8fafc; font-size: 22px; font-weight: bold; }}
-        #pageCountLabel {{ color: #ffd166; background: rgba(255,209,102,0.10); border: 1px solid rgba(255,209,102,0.28); border-radius: 10px; padding: 6px 10px; }}
-        #sectionLabel, #fieldLabel {{ color: #c2cee0; font-size: 11px; font-weight: bold; }}
+        #sidebarTopFill {{ background: {RAIL_BG}; border-top-left-radius: 16px; }}
+        #detailPanel {{ background: transparent; }}
+        #pageHeading {{ color: {TEXT_PRIMARY}; font-size: 20px; font-weight: bold; }}
+        #pageSubLabel {{ color: {TEXT_SECONDARY}; font-size: 12px; }}
+        #pageTitleLabel {{ color: {TEXT_PRIMARY}; font-size: 20px; font-weight: bold; }}
+        #pageCountLabel {{ color: {TEXT_SECONDARY}; background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 8px; padding: 5px 10px; font-size: 12px; }}
+        #sectionLabel, #fieldLabel {{ color: {TEXT_PRIMARY}; font-size: 13px; font-weight: bold; }}
         #statusText {{ color: {COLOR_TEXT}; }}
-        #stack {{ background: rgba(15,23,42,0.55); border-radius: 12px; }}
+        #stack {{ background: transparent; }}
         #stackPage {{ background: transparent; }}
-        #contentSurface {{ background: #172337; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; }}
-        #infoTile {{ background: #172337; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 14px; min-height: 28px; }}
-        #dashCard {{ background: rgba(55,65,81,0.75); border: 1px solid rgba(255,255,255,0.16); border-radius: 12px; }}
-        #dashCard:hover {{ background: rgba(71,85,105,0.85); border-color: rgba(255,255,255,0.28); }}
-        #dashTitle {{ color: #9ca3af; font-size: 12px; }}
+        QScrollArea#pageScroll {{ background: transparent; border: none; }}
+        QScrollArea#pageScroll > QWidget > QWidget {{ background: transparent; }}
+        #contentSurface, #statToolbar, #cmdToolbar {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; }}
+        #infoTile {{ background: {SURFACE}; color: {TEXT_BODY}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; padding: 14px; min-height: 28px; }}
+        #dashCard {{ background: rgba(13,21,36,0.78); border: 1px solid rgba(255,255,255,0.12); border-radius: {RADIUS_CARD}px; }}
+        #dashCard:hover {{ background: rgba(26,37,57,0.90); border-color: rgba(255,255,255,0.22); }}
+        #dashTitle {{ color: {TEXT_SECONDARY}; font-size: 12px; }}
         #dashValue {{ color: #ffffff; font-size: 18px; font-weight: bold; }}
-        #dashSub {{ color: #9ca3af; font-size: 11px; }}
-        #toolBtn {{ background: rgba(55,65,81,0.75); color: #dbe6f5; border: 1px solid rgba(255,255,255,0.16); border-radius: 10px; padding: 6px 10px; font-size: 12px; }}
-        #toolBtn:hover {{ background: rgba(71,85,105,0.90); border-color: rgba(255,255,255,0.30); color: #ffffff; }}
-        #toolBtn:pressed {{ background: rgba(55,65,81,0.95); }}
-        #featureList, #permList, #roleList, #statList {{ background: #121e30; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 7px; outline: none; font-size: 13px; }}
-        #featureList::item, #permList::item, #roleList::item {{ padding: 10px 13px; border: 1px solid transparent; border-radius: 9px; margin: 2px 0; }}
-        #featureList::item:hover, #permList::item:hover, #roleList::item:hover {{ background: #1b2a41; border-color: rgba(106,212,255,0.18); }}
-        #permissionCheck {{ color: #dbe6f5; background: #18283d; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 9px 12px; spacing: 10px; }}
-        #permissionCheck:hover {{ background: #203653; border-color: rgba(106,212,255,0.30); }}
-        #permissionCheck:disabled {{ color: #718096; background: #142033; }}
-        #permissionCheck::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #60728d; background: #0d1726; }}
-        #permissionCheck::indicator:checked {{ background: #6ad4ff; border-color: #6ad4ff; image: url({CHECKMARK_SVG}); }}
-        #permissionCheck:pressed {{ background: #2b4768; }}
-        #featureList::item:selected, #permList::item:selected, #roleList::item:selected {{ background: #223957; border-color: rgba(106,212,255,0.46); color: #ffffff; }}
+        #dashSub {{ color: {TEXT_SECONDARY}; font-size: 11px; }}
+        #toolBtn {{ background: {SURFACE_RAISED}; color: {TEXT_BODY}; border: 1px solid {BORDER_STRONG}; border-radius: {RADIUS_CONTROL}px; padding: 6px 12px; font-size: 12px; }}
+        #toolBtn:hover {{ background: {SURFACE_HOVER}; border-color: rgba(106,212,255,0.40); color: #ffffff; }}
+        #toolBtn:pressed {{ background: {SURFACE_SELECTED}; }}
+        #toolBtn:disabled {{ color: {TEXT_HINT}; background: {SURFACE}; border-color: {BORDER}; }}
+        #primaryBtn {{ background: {ACCENT}; color: #04202c; border: none; border-radius: {RADIUS_CONTROL}px; padding: 6px 14px; font-size: 12px; font-weight: bold; }}
+        #primaryBtn:hover {{ background: #8fe0ff; }}
+        #featureList, #permList, #roleList, #statList {{ background: {SURFACE}; color: {TEXT_BODY}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; padding: 6px; outline: none; font-size: 13px; }}
+        #featureList::item, #permList::item, #roleList::item {{ padding: 9px 12px; border: 1px solid transparent; border-radius: 8px; margin: 1px 0; }}
+        #featureList::item:hover, #permList::item:hover, #roleList::item:hover {{ background: {SURFACE_HOVER}; }}
+        #featureList::item:selected, #permList::item:selected, #roleList::item:selected {{ background: {SURFACE_SELECTED}; border-color: rgba(106,212,255,0.35); color: #ffffff; }}
+        #permissionCheck {{ color: {TEXT_BODY}; background: transparent; border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; spacing: 10px; }}
+        #permissionCheck:hover {{ background: {SURFACE_HOVER}; }}
+        #permissionCheck:disabled {{ color: {TEXT_HINT}; }}
+        #permissionCheck::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid #5b6b84; background: {SURFACE_DEEP}; }}
+        #permissionCheck::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: url({CHECKMARK_SVG}); }}
+        #permissionCheck:pressed {{ background: {SURFACE_SELECTED}; }}
         #featureList::item {{ padding: 12px 14px; }}
-        #statList::item {{ padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.07); border-radius: 7px; margin: 2px 0; }}
-        #statList::item:hover {{ background: #1b2a41; }}
-        #statList::item:selected {{ background: #263957; color: #ffffff; }}
-        #logText, #promptText, #rolePromptEdit {{ background: #0d1726; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.10); border-radius: 12px; padding: 12px; font-family: Consolas, "Microsoft YaHei"; font-size: 12px; selection-background-color: #31537b; }}
-        #roleNameEdit, #searchInput {{ background: #0d1726; color: #f4f7ff; border: 1px solid rgba(255,255,255,0.10); border-radius: 9px; padding: 10px 12px; font-size: 13px; min-height: 18px; }}
-        #roleNameEdit:focus, #searchInput:focus, #rolePromptEdit:focus, #logText:focus {{ border-color: rgba(106,212,255,0.60); }}
-        #filterBtn {{ background: #1b2a41; border: 1px solid rgba(255,255,255,0.10); border-radius: 9px; }}
-        #filterBtn:hover {{ background: #263957; border-color: rgba(106,212,255,0.42); }}
-        #filterBtn:pressed {{ background: #31486b; }}
-        QComboBox {{ background: #0d1726; color: #f4f7ff; border: 1px solid rgba(255,255,255,0.12); border-radius: 9px; padding: 8px 12px; font-size: 13px; min-height: 20px; }}
-        QComboBox:hover {{ border-color: rgba(106,212,255,0.45); }}
-        QComboBox:focus {{ border-color: rgba(106,212,255,0.60); }}
+        #statList::item {{ padding: 9px 12px; border-bottom: 1px solid {BORDER}; margin: 0; }}
+        #statList::item:hover {{ background: {SURFACE_HOVER}; }}
+        #statList::item:selected {{ background: {SURFACE_SELECTED}; color: #ffffff; }}
+        #logText, #promptText, #rolePromptEdit {{ background: {SURFACE_DEEP}; color: {TEXT_BODY}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; padding: 12px; font-family: Consolas, "Microsoft YaHei"; font-size: 12px; selection-background-color: #31537b; }}
+        #roleNameEdit, #searchInput {{ background: {SURFACE_DEEP}; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_STRONG}; border-radius: {RADIUS_CONTROL}px; padding: 8px 12px; font-size: 13px; min-height: 18px; }}
+        #roleNameEdit:focus, #searchInput:focus, #rolePromptEdit:focus, #logText:focus {{ border-color: {BORDER_ACCENT}; }}
+        #filterBtn {{ background: {SURFACE_RAISED}; border: 1px solid {BORDER_STRONG}; border-radius: {RADIUS_CONTROL}px; }}
+        #filterBtn:hover {{ background: {SURFACE_HOVER}; border-color: rgba(106,212,255,0.40); }}
+        #filterBtn:pressed {{ background: {SURFACE_SELECTED}; }}
+        QComboBox {{ background: {SURFACE_DEEP}; color: {TEXT_PRIMARY}; border: 1px solid {BORDER_STRONG}; border-radius: {RADIUS_CONTROL}px; padding: 6px 12px; font-size: 13px; min-height: 20px; }}
+        QComboBox:hover {{ border-color: rgba(106,212,255,0.40); }}
+        QComboBox:focus {{ border-color: {BORDER_ACCENT}; }}
         QComboBox::drop-down {{ border: none; width: 24px; }}
-        QComboBox QAbstractItemView {{ background: #142033; color: #dbe6f5; border: 1px solid rgba(106,212,255,0.25); border-radius: 10px; padding: 6px; outline: none; }}
-        QComboBox QAbstractItemView::item {{ padding: 7px 14px; border-radius: 6px; min-height: 22px; }}
-        QComboBox QAbstractItemView::item:hover {{ background: #1b2a41; }}
-        QComboBox QAbstractItemView::item:selected {{ background: #263957; color: #ffffff; }}
-        QScrollBar:vertical {{ background: #0d1726; width: 10px; margin: 6px 3px 6px 0; border-radius: 5px; }}
-        QScrollBar::handle:vertical {{ background: #344866; min-height: 34px; border-radius: 5px; }}
-        QScrollBar::handle:vertical:hover {{ background: #6ad4ff; }}
+        QComboBox QAbstractItemView {{ background: {SURFACE}; color: {TEXT_BODY}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 4px; outline: none; }}
+        QComboBox QAbstractItemView::item {{ padding: 6px 12px; border-radius: 6px; min-height: 22px; }}
+        QComboBox QAbstractItemView::item:hover {{ background: {SURFACE_HOVER}; }}
+        QComboBox QAbstractItemView::item:selected {{ background: {SURFACE_SELECTED}; color: #ffffff; }}
+        QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px 2px 4px 0; }}
+        QScrollBar::handle:vertical {{ background: rgba(255,255,255,0.14); min-height: 36px; border-radius: 4px; }}
+        QScrollBar::handle:vertical:hover {{ background: rgba(255,255,255,0.26); }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
-        QScrollBar:horizontal {{ background: #0d1726; height: 10px; margin: 0 6px 3px 6px; border-radius: 5px; }}
-        QScrollBar::handle:horizontal {{ background: #344866; min-width: 34px; border-radius: 5px; }}
-        QScrollBar::handle:horizontal:hover {{ background: #6ad4ff; }}
+        QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0 4px 2px 4px; }}
+        QScrollBar::handle:horizontal {{ background: rgba(255,255,255,0.14); min-width: 36px; border-radius: 4px; }}
+        QScrollBar::handle:horizontal:hover {{ background: rgba(255,255,255,0.26); }}
         QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0; }}
+        QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
         #artPanel {{ background: transparent; }}
-        #footerLabel {{ color: rgba(255,255,255,0.30); }}
-        #featureGroup {{ background: #172337; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; }}
-        #featGroupTitle {{ color: #e2e9f4; font-size: 14px; font-weight: bold; }}
-        #featureRow {{ background: transparent; border-radius: 10px; }}
-        #featureRow:hover {{ background: #1b2a41; }}
-        #featName {{ color: #f1f5f9; font-size: 14px; font-weight: bold; }}
-        #featDesc {{ color: #9aabc4; font-size: 12px; }}
-        #featTag {{ color: #6ad4ff; background: rgba(106,212,255,0.10); border: 1px solid rgba(106,212,255,0.22); border-radius: 9px; padding: 2px 10px; font-size: 10px; }}
-        #featSep {{ background: rgba(255,255,255,0.06); border: none; max-height: 1px; min-height: 1px; }}
-        #cmdToolbar {{ background: #172337; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; }}
-        #cmdCatBtn {{ background: rgba(13,23,38,0.75); color: #9fb0c9; border: 1px solid rgba(255,255,255,0.08); border-radius: 9px; padding: 6px 14px; font-size: 13px; }}
-        #cmdCatBtn:hover {{ background: #1b2a41; color: #f1f5f9; border-color: rgba(106,212,255,0.28); }}
-        #cmdCatBtn:checked {{ background: rgba(56,189,248,0.18); color: #6ad4ff; border-color: rgba(106,212,255,0.52); font-weight: bold; }}
-        #cmdTriggerTag {{ color: #ffd166; background: rgba(255,209,102,0.10); border: 1px solid rgba(255,209,102,0.24); border-radius: 7px; padding: 1px 8px; font-size: 11px; }}
-        #cmdBadgeBtn {{ color: #6ad4ff; background: rgba(106,212,255,0.10); border: 1px solid rgba(106,212,255,0.24); border-radius: 9px; padding: 5px 12px; font-family: Consolas, "Microsoft YaHei"; font-size: 12px; }}
-        #cmdBadgeBtn:hover {{ background: rgba(106,212,255,0.22); color: #ffffff; border-color: rgba(106,212,255,0.55); }}
-        #cmdBadgeBtn:pressed {{ background: rgba(106,212,255,0.32); }}
-        #cmdCatCaption {{ color: #6f819c; font-size: 12px; font-weight: bold; }}
-        #gameManagement {{ background: #0e1626; }}
-        #gameHeader {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #16253d, stop:1 #111d33); border: 1px solid rgba(130,214,207,0.18); border-radius: 14px; }}
-        #gameTitle {{ color: #f1f5f9; font-size: 18px; font-weight: bold; }}
-        #gameSubtitle {{ color: #8ea0ba; font-size: 12px; }}
-        #gameChip {{ color: #9eb0c6; background: rgba(148,163,184,0.12); border: 1px solid rgba(148,163,184,0.25); border-radius: 11px; padding: 4px 12px; font-size: 12px; }}
-        #gameChip[state="ok"] {{ color: #5fe0a4; background: rgba(95,224,164,0.12); border-color: rgba(95,224,164,0.32); }}
-        #gameChip[state="warn"] {{ color: #ffd166; background: rgba(255,209,102,0.12); border-color: rgba(255,209,102,0.30); }}
-        #gameChip[state="bad"] {{ color: #fca5a5; background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.32); }}
-        #gameBtn, #gamePrimaryBtn {{ background: #1a2940; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.10); border-radius: 9px; padding: 6px 12px; font-size: 12px; min-height: 18px; }}
-        #gameBtn:hover {{ background: #22365a; color: #ffffff; border-color: rgba(106,212,255,0.40); }}
-        #gameBtn:pressed {{ background: #2b4768; }}
-        #gameBtn:disabled, #gamePrimaryBtn:disabled {{ color: #64748b; background: #152033; }}
-        #gamePrimaryBtn {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #82d6cf, stop:1 #4fb7c9); color: #06222a; border: none; font-weight: bold; }}
-        #gamePrimaryBtn:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #9be6df, stop:1 #62c6d6); }}
-        #gameZoomGroup {{ background: #13203a; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; }}
-        #gameZoomBtn {{ background: transparent; color: #dbe6f5; border: none; border-radius: 7px; padding: 4px 8px; font-size: 12px; }}
-        #gameZoomBtn:hover {{ background: #22365a; color: #ffffff; }}
-        #gameConsole {{ background: #0b1018; border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; }}
-        #gamePlaceholder {{ color: #8ea0ba; font-size: 13px; }}
+        #footerLabel {{ color: rgba(255,255,255,0.32); }}
+        #featureGroup {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; }}
+        #featGroupTitle {{ color: {TEXT_PRIMARY}; font-size: 14px; font-weight: bold; }}
+        #featureRow {{ background: transparent; border-radius: 8px; }}
+        #featureRow:hover {{ background: {SURFACE_HOVER}; }}
+        #featName {{ color: {TEXT_PRIMARY}; font-size: 13px; font-weight: bold; }}
+        #featDesc {{ color: {TEXT_SECONDARY}; font-size: 12px; }}
+        #featTag {{ color: {TEXT_SECONDARY}; background: rgba(148,163,184,0.10); border: none; border-radius: 6px; padding: 2px 8px; font-size: 11px; }}
+        #featSep {{ background: {BORDER}; border: none; max-height: 1px; min-height: 1px; }}
+        #cmdCatBtn {{ background: transparent; color: {TEXT_SECONDARY}; border: 1px solid {BORDER_STRONG}; border-radius: 14px; padding: 4px 14px; font-size: 13px; }}
+        #cmdCatBtn:hover {{ background: {SURFACE_HOVER}; color: {TEXT_PRIMARY}; }}
+        #cmdCatBtn:checked {{ background: {ACCENT_SOFT}; color: {ACCENT}; border-color: rgba(106,212,255,0.50); font-weight: bold; }}
+        #cmdTriggerTag {{ color: {TEXT_SECONDARY}; background: rgba(148,163,184,0.10); border: none; border-radius: 6px; padding: 1px 7px; font-size: 11px; }}
+        #cmdBadgeBtn {{ color: {ACCENT}; background: {SURFACE_DEEP}; border: 1px solid rgba(106,212,255,0.22); border-radius: 6px; padding: 4px 10px; font-family: Consolas, "Microsoft YaHei"; font-size: 12px; }}
+        #cmdBadgeBtn:hover {{ background: {ACCENT_SOFT}; color: #ffffff; border-color: rgba(106,212,255,0.55); }}
+        #cmdBadgeBtn:pressed {{ background: rgba(106,212,255,0.28); }}
+        #cmdCatCaption {{ color: {TEXT_HINT}; font-size: 12px; font-weight: bold; }}
+        #gameManagement {{ background: {APP_BG}; }}
+        #gameHeader {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; }}
+        #gameTitle {{ color: {TEXT_PRIMARY}; font-size: 18px; font-weight: bold; }}
+        #gameSubtitle {{ color: {TEXT_SECONDARY}; font-size: 12px; }}
+        #gameChip {{ color: {TEXT_SECONDARY}; background: rgba(148,163,184,0.12); border: 1px solid rgba(148,163,184,0.25); border-radius: 11px; padding: 4px 12px; font-size: 12px; }}
+        #gameChip[state="ok"] {{ color: {STATUS_OK}; background: rgba(52,211,153,0.12); border-color: rgba(52,211,153,0.32); }}
+        #gameChip[state="warn"] {{ color: {STATUS_WARN}; background: rgba(251,191,36,0.12); border-color: rgba(251,191,36,0.30); }}
+        #gameChip[state="bad"] {{ color: {STATUS_BAD}; background: rgba(248,113,113,0.12); border-color: rgba(248,113,113,0.32); }}
+        #gameBtn, #gamePrimaryBtn {{ background: {SURFACE_RAISED}; color: {TEXT_BODY}; border: 1px solid {BORDER_STRONG}; border-radius: {RADIUS_CONTROL}px; padding: 6px 12px; font-size: 12px; min-height: 18px; }}
+        #gameBtn:hover {{ background: {SURFACE_HOVER}; color: #ffffff; border-color: rgba(106,212,255,0.40); }}
+        #gameBtn:pressed {{ background: {SURFACE_SELECTED}; }}
+        #gameBtn:disabled, #gamePrimaryBtn:disabled {{ color: {TEXT_HINT}; background: {SURFACE}; }}
+        #gamePrimaryBtn {{ background: {ACCENT}; color: #04202c; border: none; font-weight: bold; }}
+        #gamePrimaryBtn:hover {{ background: #8fe0ff; }}
+        #gameZoomGroup {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 10px; }}
+        #gameZoomBtn {{ background: transparent; color: {TEXT_BODY}; border: none; border-radius: 7px; padding: 4px 8px; font-size: 12px; }}
+        #gameZoomBtn:hover {{ background: {SURFACE_HOVER}; color: #ffffff; }}
+        #gameConsole {{ background: #0a0f18; border: 1px solid {BORDER}; border-radius: {RADIUS_CARD}px; }}
+        #gamePlaceholder {{ color: {TEXT_SECONDARY}; font-size: 13px; }}
         """
 
     def _init_backend(self):

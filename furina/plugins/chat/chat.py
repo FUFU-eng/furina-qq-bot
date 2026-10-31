@@ -81,8 +81,8 @@ async def _retry_reply(messages: list, prev_reply: str, instruction: str) -> str
         return prev_reply
 
 
-async def _collect_message_images(event, group_id) -> tuple[list, dict | None]:
-    """下载本条消息里的图片，返回 (图片字节列表, 第一条图片的缓存条目)。"""
+async def _collect_message_images(event, group_id, extra_image_segments=None) -> tuple[list, dict | None]:
+    """下载本条消息里的图片（可附加转发节点里的引用），返回图片字节与第一条缓存条目。"""
     out: list = []
     first_entry = None
     if not config.CHAT_VISION:
@@ -91,12 +91,16 @@ async def _collect_message_images(event, group_id) -> tuple[list, dict | None]:
         bot = bot_for(event)
     except Exception:
         return out, None
-    for stype, sdata in _iter_segments(event.message):
-        if stype != "image":
-            continue
-        data = await vision.fetch_image_bytes(
-            bot, str(sdata.get("file") or ""), str(sdata.get("url") or "")
-        )
+    image_segments = [
+        (str(sdata.get("file") or ""), str(sdata.get("url") or ""))
+        for stype, sdata in _iter_segments(event.message) if stype == "image"
+    ]
+    image_segments.extend(
+        (str(file_id or ""), str(url or ""))
+        for file_id, url in (extra_image_segments or [])
+    )
+    for file_id, url in image_segments:
+        data = await vision.fetch_image_bytes(bot, file_id, url)
         if not data:
             continue
         # 旧版还会把每张图的字节塞进 _group_recent_images（每群 8 张），但全项目没有任何读取方，
@@ -618,11 +622,10 @@ async def _reply(event, group_id, nickname, store, current_text, has_image, quot
         sticker_url, voice_marked = None, False
     reply, act = actions.parse(reply, group_id)
 
-    # 动作标记只响应明确的请求：随机接话/被戳时没人要求她做事，历史里的一句话（群消息原样进上下文）
-    # 就可能让她在插话时删词条、艾特别人、设精华或甩图库图片。标记照样剥掉，只是不执行。
+    # 主动艾特群友是她自己的选择，不要求先被叫到；其余动作仍只响应明确请求。
     if not (forced and allow_actions) and act.has_side_effects():
-        logger.info(f"[AI聊天] 群{group_id} 非艾特请求的回复里出现动作标记，已忽略（只在被艾特时执行）")
-        act.drop_side_effects()
+        logger.info(f"[AI聊天] 群{group_id} 主动回复保留艾特，其余动作标记忽略")
+        act.drop_side_effects(keep_at=True)
 
     # 只回一张表情包/图片属于无效回复：没有任何文字时直接不发，
     # 表情包只能跟在文字后面一起发，绝不单独发一张图

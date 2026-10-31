@@ -118,7 +118,43 @@ def _sender(bot, gid, bare_images=False):
             msg = Message(MessageSegment.text(text)) if text else Message()
             for path in paths:
                 msg.append(MessageSegment.image(path.resolve().as_uri(), cache=False))
-            return await send_once(bot,gid,text,paths,'send_group_msg',{'group_id':int(gid),'message':msg,'timeout':300000})
+            try:
+                return await send_once(bot,gid,text,paths,'send_group_msg',{'group_id':int(gid),'message':msg})
+            except asyncio.CancelledError:
+                raise
+            except Exception as first_exc:
+                if not paths or bare_images:
+                    raise
+                from ...services.pixiv.downloader import make_antishield_copy
+                alt_files = []
+                try:
+                    logger.warning(f'[Pixiv] 群{gid} 单图直发被拦截或超时（{type(first_exc).__name__}），尝试防屏蔽重编码+合并转发兜底')
+                    soft_paths = [await asyncio.to_thread(make_antishield_copy, p, mode='soft') for p in paths]
+                    alt_files.extend(soft_paths)
+                    def _node(c):
+                        return {"type": "node", "data": {"name": "Pixiv 画作", "uin": str(bot.self_id), "content": c}}
+                    nodes = [_node([MessageSegment.text(text)])] if text else []
+                    for sp in soft_paths:
+                        nodes.append(_node([MessageSegment.image(sp.resolve().as_uri(), cache=False)]))
+                    try:
+                        return await send_once(bot,gid,text,soft_paths,'send_forward_msg',{'group_id':int(gid),'messages':nodes,'timeout':45000},first=start_page,total=total_pages,forward=True)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as second_exc:
+                        logger.warning(f'[Pixiv] 群{gid} 合并转发兜底仍失败（{type(second_exc).__name__}），尝试旋转90度防屏蔽直发')
+                        rot_paths = [await asyncio.to_thread(make_antishield_copy, p, mode='rotate') for p in paths]
+                        alt_files.extend(rot_paths)
+                        rot_text = f'{text}（原图被QQ屏蔽，已旋转90°防吞）' if text else '（原图被QQ屏蔽，已旋转90°防吞）'
+                        rot_msg = Message(MessageSegment.text(rot_text))
+                        for rp in rot_paths:
+                            rot_msg.append(MessageSegment.image(rp.resolve().as_uri(), cache=False))
+                        return await send_once(bot,gid,text,rot_paths,'send_group_msg',{'group_id':int(gid),'message':rot_msg,'timeout':30000},first=start_page,total=total_pages,forward=False)
+                finally:
+                    for af in alt_files:
+                        try:
+                            af.unlink(missing_ok=True)
+                        except OSError:
+                            pass
     return send
 
 

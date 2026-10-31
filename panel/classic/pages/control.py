@@ -63,10 +63,11 @@ class BotControlMixin:
         return bool(self._find_bot_processes(include_cmd=False))
 
     def _kill_napcat_processes(self):
-        """Explicit stop/account switch only: target this installation's boot tree."""
+        """Stop only the configured local transport, after SnowLuma unloads its QQ hook."""
+        from furina.core import qq_transport
         _v2.stop_napcat()
         proc = getattr(self, "napcat_proc", None)
-        if proc is not None and proc.poll() is None:
+        if proc is not None and proc.poll() is None and not qq_transport.uses_snowluma():
             self._kill_process_ids([proc.pid])
         self.napcat_proc = None
 
@@ -79,9 +80,10 @@ class BotControlMixin:
 
         def work():
             try:
-                napcat_ok = self.check_port(6099)
+                from furina.core import qq_transport
+                napcat_ok = self._napcat_is_running()
                 nonebot_ok = self.check_nonebot_running()
-                health = query_health(qq)
+                health = query_health("" if qq_transport.uses_snowluma() else qq)
                 # A result from before a start/stop/account switch is stale.
                 if generation == self._login_generation and not self.busy:
                     self.signals.running.emit(napcat_ok and nonebot_ok)
@@ -91,7 +93,8 @@ class BotControlMixin:
         threading.Thread(target=work, daemon=True).start()
 
     def _query_qq_online(self):
-        return query_health(self._read_env_value("BOT_QQ").strip())
+        from furina.core import qq_transport
+        return query_health("" if qq_transport.uses_snowluma() else self._read_env_value("BOT_QQ").strip())
 
     def _render_health(self):
         if not hasattr(self, "rail_status_text"):
@@ -100,7 +103,7 @@ class BotControlMixin:
         # 侧栏只有约 100px 给文字：用短词，完整说明放在悬停提示里（放不下时 StatusLabel 会以省略号收尾）。
         if not self.bot_running:
             text, color = "机器人未运行", "#ef4444"
-            tip = "NapCat（6099）或 NoneBot（8080）没有在运行，点主页「启动机器人」。\n点击查看登录状态"
+            tip = "QQ接入端或 NoneBot（8080）没有在运行，点主页「启动机器人」。\n点击查看登录状态"
         elif health.state == "online":
             text, color = "QQ 在线", "#10b981"
             tip = health.detail
@@ -190,16 +193,18 @@ class BotControlMixin:
     # ===== 机器人控制 =====
 
     def test_connection(self):
-        """点击「芙芙状态·测试」卡：后台探测 NapCat(127.0.0.1:3000)，用浮层/弹窗反馈，不卡界面。"""
+        """点击「芙芙状态·测试」卡：后台探测当前接入端（NapCat / SnowLuma 的 OneBot HTTP 接口），用浮层/弹窗反馈，不卡界面。"""
         card = getattr(self, "start_card", None)
         if card is not None:
             card.value_label.setText("检测中…")
             card.value_label.setStyleSheet("color: #91a2bc;")
 
         qq = self._read_env_value("BOT_QQ").strip()
+        from furina.core import qq_transport
+        expected = "" if qq_transport.uses_snowluma() else qq
 
         def work():
-            health = query_health(qq)
+            health = query_health(expected)
             ready = self.check_nonebot_running()
             ok = health.state == "online" and ready
             detail = health.detail
@@ -304,25 +309,34 @@ class BotControlMixin:
         return _v2.napcat_running()
 
     def _start_bot_work(self):
-        self.signals.log.emit("info", "[系统] 正在启动机器人（保留已有 QQ 登录会话）...")
+        from furina.core import qq_transport
+        snow = qq_transport.uses_snowluma()
+        self.signals.log.emit("info", f"[系统] 正在启动机器人与{'SnowLuma本地接入端' if snow else 'NapCat'}...")
         qq = self._read_env_value("BOT_QQ").strip()
-        if not qq.isdigit():
+        if not qq.isdigit() and not snow:
             raise ValueError(".env 里的 BOT_QQ 为空或不是纯数字")
         if self._napcat_is_running():
-            health = query_health(qq)
-            if health.state == "mismatch":
+            health = query_health("" if snow else qq)
+            if health.state == "mismatch" and not snow:
                 raise RuntimeError(health.detail + "；请在 QQ 管理中明确切换账号")
-            self.signals.log.emit("info", "[系统] 复用已有 NapCat；未登录时请在 WebUI 人工确认，不自动重登")
+            self.signals.log.emit("info", f"[系统] 复用已有{'SnowLuma' if snow else 'NapCat'}接入端" +
+                                   ("；需在SnowLuma本地WebUI手动选择并加载QQ，确认前消息不会处理" if snow else "；不自动重登"))
         else:
-            self.napcat_proc = subprocess.Popen(
-                ["cmd.exe", "/k", f"launcher-user.bat {qq}"],
-                cwd=NAPCAT_DIR, creationflags=_NO_WINDOW,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            time.sleep(8)
+            self.napcat_proc = _v2.start_qq_transport(None if snow else qq)
+            time.sleep(3 if snow else 8)
+        if snow:
+            if not qq_transport.env.get_bool("SNOWLUMA_ACCOUNT_CONFIRMED", False):
+                self.signals.log.emit("success", f"[SnowLuma] 管理页已就绪：{_v2.webui_url()}；请手动加载目标QQ并在登录助手确认")
+                self.signals.running.emit(False)
+                return
+            live = query_health("")
+            if live.state != "online" or not qq or live.user_id != qq:
+                self.signals.log.emit("warn", f"[SnowLuma] 当前连接账号 {live.user_id or '未连接'} 与已确认 BOT_QQ 不一致或未上线；机器人保持停止，请重新核对并确认")
+                self.signals.running.emit(False)
+                return
         generation = self._login_generation
         if self.check_nonebot_running():
-            self.signals.running.emit(self.check_port(6099))
+            self.signals.running.emit(self._napcat_is_running())
             self.signals.log.emit("info", "[系统] 检测到机器人服务已运行，不重复启动")
             threading.Thread(target=self._monitor_napcat_login, args=(qq, generation), daemon=True).start()
             return
@@ -369,16 +383,23 @@ class BotControlMixin:
         threading.Thread(target=self._monitor_napcat_login, args=(qq, generation), daemon=True).start()
 
     def _monitor_napcat_login(self, qq, generation, timeout=120):
-        """Only online + matching account is login success; cached UIN is not proof."""
+        """Only report a live OneBot connection; SnowLuma account binding stays explicit."""
+        from furina.core import qq_transport
+        snow = qq_transport.uses_snowluma()
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if generation != self._login_generation:
                 return
-            health = query_health(qq)
+            health = query_health("" if snow else qq)
             if generation != self._login_generation:
                 return
             if health.state == "online":
-                self.signals.log.emit("success", f"[系统] NapCat 已确认 QQ {qq} 在线")
+                confirmed = self._read_env_value("SNOWLUMA_ACCOUNT_CONFIRMED").lower() in ("1", "true", "yes", "on")
+                current = self._read_env_value("BOT_QQ").strip()
+                if snow and (not confirmed or current != health.user_id):
+                    self.signals.log.emit("warn", f"[SnowLuma] 已检测到QQ {health.user_id}，请在登录助手确认账号；确认前消息不处理")
+                else:
+                    self.signals.log.emit("success", f"[系统] 已确认 {'SnowLuma' if snow else 'NapCat'} QQ {health.user_id or qq} 在线")
                 self.signals.online_state.emit(health)
                 return
             if health.state == "mismatch":
@@ -411,7 +432,7 @@ class BotControlMixin:
         self._kill_bot_processes()
         self._kill_napcat_processes()
         for _ in range(20):
-            if not self.check_nonebot_running() and not self.check_port(6099):
+            if not self.check_nonebot_running() and not self._napcat_is_running():
                 break
             time.sleep(0.5)
         self.signals.log.emit("success", "[系统] 机器人已停止")
@@ -427,11 +448,20 @@ class BotControlMixin:
 
         def run():
             try:
-                if restart_napcat:
+                from panel.services.control import find_bot_processes, trial_load
+
+                if find_bot_processes():
+                    self.signals.log.emit("info", "[系统] 先试加载新代码...")
+                    ok, msg = trial_load()
+                    if not ok:
+                        self.signals.log.emit("error", "[错误] 新代码加载失败，旧机器人保持运行，没有重启：\n" + msg)
+                        return
+                from furina.core import qq_transport
+                if restart_napcat and not qq_transport.uses_snowluma():
                     self._stop_bot_work()
                 else:
                     self._kill_bot_processes()
-                    self.signals.log.emit("info", "[系统] 仅重启 NoneBot，保留 NapCat 登录会话")
+                    self.signals.log.emit("info", f"[系统] 仅重启 NoneBot，保留{'SnowLuma接入端/QQ会话' if qq_transport.uses_snowluma() else 'NapCat登录会话'}")
                 time.sleep(2)
                 self._start_bot_work()
             except Exception as e:
@@ -442,6 +472,16 @@ class BotControlMixin:
         threading.Thread(target=run, daemon=True).start()
 
     def restart_napcat_for_login(self):
+        from furina.core import qq_transport
+        if qq_transport.uses_snowluma():
+            try:
+                if not self._napcat_is_running():
+                    self.napcat_proc = _v2.start_qq_transport(None)
+                self.signals.log.emit("info", f"[SnowLuma] 请打开本机管理页 { _v2.webui_url() }，同意首次条款后手动选择QQ并加载")
+                return True
+            except Exception as e:
+                self.add_log("error", f"[SnowLuma] 启动本地管理页失败：{e}")
+                return False
         """登录助手里的「重启 NapCat」，只在用户点击时执行。
 
         - 只重启机器人用的 NapCat / QQ 进程树：不碰用户自己打开的 QQ，也不停 NoneBot；

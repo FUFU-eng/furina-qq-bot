@@ -37,7 +37,7 @@ class TopicTest(unittest.TestCase):
 
         _env.write_env(_ENV)
         with mock.patch.object(chat_llm, "chat", side_effect=fake_llm):
-            asyncio.run(planner.plan("#1 你：让AI装桌宠，装坏了算谁的", "路人甲：天选姬已被打入冷宫", False))
+            asyncio.run(planner.plan("#1 你：让AI装桌宠，装坏了算谁的", "不知道起啥名：天选姬已被打入冷宫", False))
             asyncio.run(planner.plan("", "甲：今晚吃啥", True))
         self.assertIn("时间挨着不等于", seen[0])
         self.assertIn("别把它猜成前面聊过的", seen[0])

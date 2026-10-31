@@ -9,7 +9,7 @@ import re
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QValidator
-from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFrame, QHBoxLayout, QLineEdit, QSpinBox, QVBoxLayout, QWidget
 
 from ..services import envfile
 from ..services import huoren_settings
@@ -72,6 +72,11 @@ CHAT = [
         ("AI_CHAT_STYLE_VARIETY", "说话方式随机变化", "bool", True, "每次随机定回复长短（有时只回几个字），并提醒她避开最近老用的开头、语气词和自称。", {}),
         ("AI_CHAT_LIFE_EVENTS", "记住群友近况", "bool", True, "群友说「明天考试」「周五面试」「我感冒了」时记下来，事情过去后找机会问一句结果；每件事只问一次。", {}),
         ("AI_CHAT_LIFE_FOLLOWUP_PROBABILITY", "有近况可问时接话概率", "pct", 0.5, "TA 有事情已经过去、还没问过时，TA 下次说话（没艾特）芙芙接话的概率。", {}),
+    ]),
+    ("认真做文件", "群友请她写攻略、清单、计划这类东西时，写成文件发到群文件。默认每个群都开着，不想要的群在「功能权限 → 认真做文件」里关掉。", [
+        ("AI_CHAT_MAKER_DAILY", "每群每天最多做几份文件", "int", 0, "群友请她认真写文件（攻略、清单、总结）时，每个群每天的上限；0 = 不限（默认）。", _o(min=0, max=50, suffix="份")),
+        ("AI_CHAT_MAKER_EFFORT", "做文件时的思考强度", "choice", "high", "off 不思考 / low 低 / high 高 / max 最高：越高写得越好、越贵。",
+         _o(choices=["off", "low", "high", "max"])),
     ]),
     ("冷场主动开话题", "群里安静太久时芙芙像群友一样主动冒个泡。各群还要在「功能权限」里打开「冷场主动开话题」（默认关）。", [
         ("AI_CHAT_PROACTIVE", "总开关", "bool", True, "关掉后所有群都不主动开话题。", {}),
@@ -195,9 +200,10 @@ SEARCH = [
         ("PIC_INBOX_IDLE_GPU", "显卡占用低于才强化", "int", 30, "打游戏、跑 AI 时显卡忙，就先不强化。", _o(min=1, max=100, suffix="%")),
         ("PIC_INBOX_IDLE_RAM_MB", "剩余内存高于才强化", "int", 3000, "", _o(max=65536, suffix="MB")),
         ("PIC_INBOX_EXPORT_DIR", "留下的图放到", "text", r"D:\Pictures\Eagle", "填 Eagle 设置里的「自动导入」文件夹。Eagle 会在里面按图库名再建一层子文件夹、只认那一层，会自动放进去。", {}),
-        ("PIC_INBOX_DIR", "待筛的图暂存在", "text", r"D:\FurinaPicInbox", "丢掉的图 5 分钟内可撤销，之后直接删除。", {}),
+        ("PIC_INBOX_DIR", "待筛的图暂存在", "text", r"G:\FurinaPicInbox", "丢掉的图 5 分钟内可撤销，之后直接删除。", {}),
         ("PIC_INBOX_PORT", "手机接口端口", "int", 52190, "只在本机监听，由隧道转到外网。", _o(min=1024, max=65535, restart=True)),
         ("PIC_INBOX_TUNNEL", "自动拉起外网隧道", "bool", True, "手机不在家也能筛图（Cloudflare 隧道，只转筛图接口）。", R),
+        ("PIC_INBOX_TUNNEL_PING", "隧道卡死自动重启", "bool", True, "每 5 分钟从外网地址试一下，连续两次连不上就只重启筛图这条隧道（不碰别的隧道）。", {}),
         ("PIC_INBOX_PUBLIC_URL", "手机连接地址", "text", "", "手机 App 里填这个地址。", {}),
         ("PIC_INBOX_REQUIRE_PASSWORD", "手机连接要密码", "bool", False, "默认不要密码，打开地址就能筛；打开后手机端要填「筛图 → 手机连接」里的密码。", {}),
     ]),
@@ -244,8 +250,10 @@ PUSH = [
 LOGIN = [
     ("QQ 掉线自动恢复", "QQ 被腾讯踢下线（「登录已失效」）后，先自动用快速登录（免扫码）重启机器人用的 NapCat；"
                       "登不上才出二维码等你扫。不会碰你自己开的 QQ。", [
+        ("BOT_TRIAL_LOAD", "重启前先试加载新代码", "bool", True, "点「重启机器人」时先在后台把代码加载一遍，有报错就不重启、旧机器人照常跑，并把报错显示出来。", {}),
         ("NAPCAT_AUTO_RECOVER", "掉线后自动重新登录", "bool", True, "关掉 = 掉线后等你在登录助手里手动处理。", {}),
         ("NAPCAT_RECOVER_DELAY", "掉线后先等", "int", 120, "等这么久还没恢复才动手（网络抖一下会自己好）。", _o(min=10, max=1800, suffix="秒")),
+        ("NAPCAT_WS_LOST_MINUTES", "连接断开也算掉线", "int", 5, "机器人和 NapCat 的连接断了这么久都没回来（又没收到下线通知），就按掉线处理：先查 QQ 状态，确实没登录 / NapCat 没在跑才自动恢复。0 = 不管。", _o(min=0, max=120, suffix="分钟")),
         ("NAPCAT_RECOVER_COOLDOWN_MIN", "自动恢复最多每", "int", 30, "这段时间内只自动试一次，免得反复重启。", _o(min=5, max=1440, suffix="分钟")),
     ]),
 ]
@@ -444,35 +452,65 @@ class EnvPage(SettingsPage):
 
     def build(self):
         self.fields: list[_Field] = []
-        for card_title, card_desc, fields in self._cards:
-            lay = self.card(card_title, card_desc or None)
-            for spec in fields:
+        many = len(self._cards) >= 4  # 卡片多的页默认只展开第一张，其余点标题展开
+        for i, (card_title, card_desc, fields) in enumerate(self._cards):
+            lay = self.card(card_title, card_desc or None, collapsible=True, count=len(fields),
+                            expanded=(not many or i == 0))
+            for j, spec in enumerate(fields):
                 f = _Field(*spec)
                 self.fields.append(f)
+                if j:
+                    sep = QFrame()
+                    sep.setObjectName("rowSep")
+                    lay.addWidget(sep)
                 self._row(lay, f)
                 f.connect(self.mark_dirty)
+        if many:
+            self._expand_btn = _button("全部展开", "link", self._toggle_all, tip="展开 / 收起本页所有分组")
+            self.header_layout.insertWidget(1, self._expand_btn, 0, Qt.AlignTop)
+
+    def _toggle_all(self, *_):
+        expand = not all(c.is_expanded() for c in self._collapsibles)
+        self.set_all_expanded(expand)
+        self._expand_btn.setText("全部收起" if expand else "全部展开")
+
+    CONTROL_WIDTH = 320
 
     def _row(self, layout, f):
-        row = QHBoxLayout()
-        row.setSpacing(16)
+        holder = QWidget()
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(0, 11, 0, 11)
+        row.setSpacing(24)
         texts = QVBoxLayout()
-        texts.setSpacing(2)
+        texts.setSpacing(3)
         head = QHBoxLayout()
         head.setSpacing(8)
         name = _label(f.label, "fieldLabel")
         name.setProperty("searchExtra", f.key)  # 键名不再显示，但设置搜索里仍能按键名搜到
-        head.addWidget(name)
+        name.setToolTip(f.key)
+        head.addWidget(name, 0, Qt.AlignVCenter)
         if f.restart:
             tag = _chip("需重启", "warn")
             tag.setToolTip("改完要重启机器人才生效")
-            head.addWidget(tag)
+            head.addWidget(tag, 0, Qt.AlignVCenter)
         head.addStretch(1)
         texts.addLayout(head)
         if f.help:
             texts.addWidget(_label(f.help, "help", wrap=True))
         row.addLayout(texts, 1)
-        row.addWidget(f.widget, 0, Qt.AlignVCenter | Qt.AlignRight)
-        layout.addLayout(row)
+        # 右侧控件列固定宽度、右对齐：开关 / 数字框 / 下拉框的右边缘排成一条线
+        ctl = QWidget()
+        ctl.setFixedWidth(self.CONTROL_WIDTH)
+        cl = QHBoxLayout(ctl)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.addStretch(1)
+        if isinstance(f.widget, QLineEdit):
+            f.widget.setMinimumWidth(0)
+            cl.addWidget(f.widget, 100)
+        else:
+            cl.addWidget(f.widget, 0)
+        row.addWidget(ctl, 0, Qt.AlignVCenter)
+        layout.addWidget(holder)
 
     def load(self):
         values = envfile.values()

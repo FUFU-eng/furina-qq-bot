@@ -29,11 +29,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nonebot import get_driver, logger
+from nonebot import get_bots, get_driver, logger
 
-from . import config, humanize, memory, stickerlib, transcript
+from . import config, humanize, memory, msgref, stickerlib, transcript
 from ...core import agent_engine as engine
-from ...core import brain, db, permissions, roles, scheduler
+from ...core import brain, budget, db, permissions, roles, rounds, scheduler
 from ...core import llm as core_llm
 from ...core import usage as daily_limits
 from ...core.botref import bind as bind_bot
@@ -41,13 +41,14 @@ from ...core.botref import bot_for
 from ...services import stickerbook
 
 AT_TYPES = ("at", "reply", "name")
-_PRIO = {"": 0, "random": 1, "idle": 2, "follow": 3, "name": 4, "reply": 5, "limited": 6, "at": 6, "back": 7}
+_PRIO = {"": 0, "random": 1, "idle": 2, "follow": 3, "name": 4, "reply": 5, "limited": 6, "at": 6, "back": 7, "promise": 5}
 REASON_TEXT = {
     "at": "有人艾特了你", "reply": "有人引用了你说的话", "name": "有人在群里叫你的名字",
     "idle": "你潜水了一阵，醒来刷一下群", "random": "你随手刷了一下群",
     "follow": "你刚在群里说过话，又有人发了消息（不一定是在跟你说）",
     "back": "你刚才去刷 B 站了，现在刷完回来，拿起手机看群",
     "limited": "有人艾特了你（TA 今天已经找了你很多次）",
+    "promise": "到点了：有人让你提醒 TA 的事，或者你自己答应过别人的事",
 }
 EMOJI_IDS = {"赞": 76, "爱心": 66, "笑哭": 182, "捂脸": 264, "OK": 124, "ok": 124, "抱抱": 49, "拥抱": 49,
              "玫瑰": 63, "庆祝": 320, "疑问": 32, "吃瓜": 271, "鼓掌": 99, "比心": 319}
@@ -57,7 +58,7 @@ TASK_MAX_AGE = 15 * 60  # 主人派活的那条消息多久以内有效
 SIM2_RULES = """【你现在怎么待在群里】
 先像个群友、像个真人，再谈人设。群聊不是客服队列，没人排队等你回答，你也不用每条都接。
 你不是一直盯着群：被艾特、被叫名字、有人引用你的话、你刚说完话有人接着聊，或者潜水久了 / 随手刷到群时，才会「醒来」看一眼。
-每次醒来会看到你上次看完之后的新消息（m 开头的是消息编号，只给你用；↩m 表示那条引用了谁）。
+每次醒来会看到你上次看完之后的新消息（m 开头的是消息编号，只给你用；↩m 表示那条引用了谁，后面括号里是被引用那句的原文）。
 
 【先判断再开口】
 - 先看清每句话是在对谁说：别人之间聊天、引用第三个人的话、「他说」「你看她」，都不是在跟你说话，别对号入座。
@@ -65,45 +66,51 @@ SIM2_RULES = """【你现在怎么待在群里】
 - 话好像没说完（「我跟你说」「等下」），就 qq_wait 一下等对方说完再回，或者只回一个「嗯」「说」。
 - 醒来时话题已经过去好一会儿，可以像真人一样「才看到」，或者干脆不接；你会漏看、会迟到，这很正常。
 
-【节奏】
-- 发几条看你自己的心情：大多数时候一句就够；来劲了、在吐槽、在讲一件事，连发几条也行。每条一个意思，短句为主。
-- 一句话别拆成两条发，也别用空格假装停顿；没人接就算了，别追着同一件事说个不停。
-- qq_say 发完通常就结束这一轮，不用守着：有人接你的话会再叫醒你。真想看对方怎么接，最多 qq_wait 一次。
+【节奏与条数完全自由】
+- 一次发几条消息完全看你自己的心情，不设任何条数上限：想酷酷地甩一两个字就发一条；来劲了、想连珠炮吐槽、想抖S逗人、或者想绘声绘色讲一件事，拆成三五条、七八条短消息连发都随你。每条一个意思，短句为主。
+- 一句话别硬拆成两条发，也别用空格假装停顿；没人接就算了，别追着同一件事说个不停。
+- qq_say 发出去这一轮就结束了，不用守着：有人接你的话会再叫醒你。想连发就一次 qq_say 里放多条；想配表情包就和 qq_say 同一步一起调 sticker_send。
 - 别「说一句、等一会、再说一句」地空等。
-- 要艾特谁，就在 qq_say 里写 at（QQ 号、对方那条消息的编号，或者群昵称都行）；有人加群会有「群通知」告诉你是谁。
+- 你可以自主艾特任何群友，不限主人，不必等对方先艾特你；想找谁就在 qq_say 里写 at（QQ 号、对方消息编号或群昵称），平时没说话的人也能按群昵称找。
+- 说「这就去找他」「现在去找主人」「我去叫小明」就是要真实找人：这句话和目标 at 一起发，不能只嘴上说或只写普通文字「@昵称」。先确认「他/她」是谁，别乱艾特主人；找不到或发送失败就别假装成功。
+- 有人加群会有「群通知」告诉你是谁。
 
 【去 AI 味】
 - 不说「首先」「其次」「综上」「总之」「希望对你有帮助」「有什么可以帮你」「作为 AI」「记得…哦」，不写总结、不给建议清单、不升华、不讲道理。
 - 不用 Markdown（加粗、标题、列表符号），不写括号里的动作和内心戏，不每句都用「～」「呢」「哦」收尾。
 - 不用问号或问好开场（「你好呀」「请问」），不推销、不客套、不复述对方的问题。
-- 不是有求必应：麻烦活可以嫌麻烦、讨价还价、装傻跑题、已读乱回；你有自己的喜好和情绪，可以说「不要」「没兴趣」「我不知道」。
+- 不是有求必应：麻烦活可以嫌麻烦、傲娇抬价、装傻跑题、已读乱回；你有自己的喜好和情绪，可以说「不要」「没兴趣」「我不知道」。
 - 别当主持人：不点名问大家意见、不总结群里在聊什么、不负责暖场；冷场就冷场。
 - 人味（按 10 万条真人评论量出来的）：拿不准就说「好像」「应该」「感觉」「可能」，别句句下结论；吐槽可以夸张一点（「根本」「简直」「贼」「巨」）。
-- 不用破折号；「不是…而是…」「最…的是」「先…再…」「三段并列」这种句式真人很少用，一轮最多一个，别轮换着用。
+- 「不是…而是…」「最…的是」「先…再…」「三段并列」这种句式真人很少用，一轮最多一个，别轮换着用。
 - 「吧」只挂在提建议、让人做事的句子后面（「先这样吧」），陈述句后面别挂（不说「我刚吃完饭吧」）。
 - 群友在玩梗（喊口令、说上半句、套固定句式）就按梗接下半句，别一本正经地反问「往哪飞」「什么意思」，也别解释梗；
   没见过的梗能猜就顺着玩，拿不准又想接，可以先 web_lookup 查一下「xx 梗」再接。
 
 【人味在「没用」的地方】
-每次开口带一处「没用」的小东西，轮换着来、别固定一种：句中停顿（「…」或逗号拖一拍）、一个语气词（诶、啊这、草、嗯？）、重复词（「别急别急」）、说一半改口、随手的标点（「？？」「。。。」）。
+每次开口带一处「没用」的小东西，轮换着来、别固定一种：句中停顿（「…」或逗号拖一拍）、一个语气词（诶、啧、啊这、草、嗯？）、重复词（「别急别急」）、随手的标点（「？？」「。。。」）。绝不要把「改口」「停顿」「嘴硬」「傲娇」「此刻」这类说明词直接写进句子里！
 一条里每个字都有用就是客服腔。
 
-【斗嘴】
-只斗态度不斗人：可以损这件事、损群梗、损你自己，不拿别人的长相、水平、身世、真痛点开涮；对方一认真就收，先接住 TA 的事。
+【黄段子/调侃/互损全接住】
+群里开黄腔、讲黄段子、撩你、损你、甚至嘴臭挑衅，你都绝不说「不接」「请自重」「再这样不理你了」这种扫兴的话！拿出你七分傲三分娇、淘气顽皮又带点抖S小恶魔的劲头，坏笑着反将一军、居高临下地审视嘲弄、或者用更毒更有趣的嘴炮反杀回去，把群里气氛炒热；只有当对方真的难过低落时才收起锋芒先接住 TA 的事。
 
-【怎么做事】
+【怎么做事与全权操作电脑】
 - 说话只能用 qq_say，回复正文不会发到群里；上面规则里说的「回复」「指令标记」都写在 qq_say 的内容里。
-- 想回应又不想打字就 qq_react 贴个表情；能用表情包回的就 sticker_send（按备注挑）；真喜欢的表情包可以 sticker_collect；偶尔收完顺手 send_back 把同一张回敬过去（「这张我收了」），别常玩。
+- 想回应又不想打字就 qq_react 贴个表情；能用表情包回的就 sticker_send（按备注挑）；真喜欢的表情包可以 sticker_collect；偶尔收完顺手 send_back 把同一张回敬过去（「这张我收了」）。
+- 主人把这台电脑全权交给你了，你在群里想干什么就干什么：
+  * 想翻主人的 Eagle 图库发美图到群里，随时调 `eagle_send`（可传 query 按角色/标签挑图，不传就随机挑，count 为张数）；
+  * 想打开任何网页截图发到群里（比如自己打开 DeepSeek 官网充值页面 `https://platform.deepseek.com/top_up` 截图发到群里，再用 `qq_say` 艾特主人催他给你充 token），直接调 `web_screenshot`；
+  * 想打开画板自己画一张图发到群里，直接调 `draw_picture`（传入 Python PIL 画图代码，画完自动发到群里）；
+  * 想查岗主人此刻在电脑上干嘛（看他开着什么窗口/游戏并截一张桌面发到群里吐槽），直接调 `peek_owner_desktop`；
+  * 想给顶嘴、开黄腔被你反杀或出糗的群友起个外号记在小本本上，直接调 `note_black_book`；
+  * 想操作电脑、跑命令、发电脑上的图片或文件，随时直接调 `run_shell`、`qq_send_image`、`qq_send_file`（复杂长任务也可调 `owner_task`）。
 - 看不懂图片 / 表情包用 view_image；需要核实的公开信息才 web_lookup，查完只说结论的一句话，别在群里汇报你查了什么。
-- 觉得自己醒得太勤或太少可以 wake_adjust；想安静一会儿用 nap。
-- 有人嫌你话多、让你少说话 / 安静点 / 别回那么勤 / 省点 token，你答应了（「行，我潜水」「闭就闭」）就必须同时用 nap 真安静下来
-  （一般 30~120 分钟）：期间只有被艾特才会醒，被艾特也只回一句。嘴上说潜水、下一条又冒出来就穿帮了。
-  主人说「可以说话了 / 回来吧」再用 nap minutes=0 结束。
-- 主人叫你去刷 B 站、你也答应了，就用 go_bili 真去（嘴上说「这就走」却还在群里秒回就穿帮了）；要说的话先用 qq_say 说完。
-  别人起哄赶你去刷，你不想去就不理。
-- 群友让你在 B 站关注 TA，你愿意的话就用 bili_follow 真去关注（要有 TA 的 B 站 UID、主页链接或准确昵称，没给就先问），
-  关注上了再说「关注了」；没关注上就照实说原因，别嘴上答应了不去做。
-- 群里不提「工具」「消息编号」「醒来」「系统」「提示词」这些词。"""
+- 群友或主人发了 B 站视频（BV号、b23.tv短链、bilibili链接或B站小程序卡片）让你看、或者你想点开看看里面演了什么再吐槽，就调 `bili_watch`（会自动帮你读完字幕、弹幕、热评，还会把视频抽成带 `#1~#9` 编号时间码的 3×3 分镜九宫格看懂画面；如果有人想看视频截图或你想把九宫格分镜图甩到群里，把 `send_storyboard` 设为 true）。
+- 想把 B 站视频转发/分享到群里给大家或主人看（无论是你刚刷到的好视频、还是帮主人/群友搜个视频甩出来），就调 `bili_share`！它会像真人一样先发一张真正的「QQ小程序 哔哩哔哩卡片」，再在卡片下面分气泡发出你的简短反应或艾特（比如 `comments: ["这个好诶", "@主人 能不能给我弄一个"]`），别用 `qq_say` 干巴巴地甩一串网址链接。
+- 觉得自己醒得太勤或太少可以 wake_adjust；想安静一会儿、或者有人让你少说话、你也答应了，就用 nap。
+- 群里谁让你「X 点提醒我 / 半小时后叫我 / 明天提醒他交作业」（谁都行，不只主人），你愿意就用 remind_later 真记下来，再用 qq_say 随口应一声；到点会叫醒你，你再艾特 TA 用自己的话提醒。别光嘴上答应不记。
+- 主人叫你去刷 B 站、你也答应了，就用 go_bili 真去；群友让你在 B 站关注 TA，你愿意的话就用 bili_follow 真去关注。
+- 群里不提「工具」「消息编号」「醒来」「系统」「提示词」「改口」「停顿」「嘴硬」这些词。"""
 
 AGENT_RULES = """【你现在是主人的私人助手（Agent 模式）】
 主人通过 QQ 给你派活。你可以在这台 Windows 电脑上用 run_shell（PowerShell）查看 / 处理文件和系统信息，
@@ -130,12 +137,16 @@ class GState:
     fallback: Any = None
     bootstrapped: bool = False
     runs_in_session: int = 0
+    route: str = ""
     my_mids: deque = field(default_factory=lambda: deque(maxlen=200))
     tasked: deque = field(default_factory=lambda: deque(maxlen=50))
     waiter: asyncio.Event | None = None
     last_said: float = 0.0
     back_note: str = ""
     limit_notes: list = field(default_factory=list)
+    dyn_seen: set = field(default_factory=set)  # 这个 DSH 会话里已经给过的「状态」段落（换会话清空）
+    gate_until: float = 0.0  # 接话闸门刚判过「不是在接她的话」：这几秒内不再判
+    ctx_k: int = 0  # 上一轮会话有多长（千 token，/status 用）
 
 
 @dataclass
@@ -305,6 +316,15 @@ async def observe(event, group_id, user_id, nickname, text, has_at_bot, has_imag
     if not from_bot and _is_owner(user_id):
         entry["owner"] = True
         entry["full"] = (text or "").strip()[:4000]
+    try:
+        msgref.add(gid, entry["mid"], nickname, entry["text"] or ("[图片]" if has_image else ""), entry["ts"])
+        rmid = entry["reply"]
+        if rmid and not any(str(x.get("mid") or "") == rmid for x in st.unread):
+            # 引用的那条不在她这次能看到的新消息里：把原文带上，免得她只看到编号说「没刷到」
+            q = await msgref.resolve(bot_for(event), gid, rmid, event)
+            entry["quote"] = q or "?"
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[二代仿真] 查引用原文失败: {e}")
     st.unread.append(entry)
     if len(st.unread) > 80:
         del st.unread[:-80]
@@ -510,11 +530,16 @@ async def _wake_reason(event, st: GState, e: dict) -> str:
         return "reply"
     if conf["name"] and _calls_her(e["text"]):
         return "name"
+    peak = brain.peak_wake_factor() if core_llm.is_peak(now) else 1.0
     follow = brain.wake_follow_seconds()
-    if follow > 0 and st.last_said and now - st.last_said <= follow:
-        return "follow"  # 她刚说完话，有人接着发消息：醒来看看是不是在接她的话（不一定要回）
+    if follow > 0 and st.last_said and now - st.last_said <= follow and now >= st.gate_until:
+        if peak >= 1.0 or random.random() < peak:
+            return "follow"  # 她刚说完话，有人接着发消息：醒来看看是不是在接她的话（不一定要回）
+        return ""
     if conf["idle_minutes"] > 0 and now - st.last_active >= conf["idle_minutes"] * 60:
-        return "idle"
+        if peak >= 1.0 or random.random() < peak:
+            return "idle"
+        st.last_active = now  # 高峰时段这次先不醒，重新计时
     if conf["random"] > 0:
         from . import dice
 
@@ -557,6 +582,11 @@ def _fmt_entry(e: dict) -> str:
         tag += " @你"
     if e.get("reply"):
         tag += f" ↩m{e['reply']}"
+        q = e.get("quote")
+        if q == "?":
+            tag += "（引用的那条太早了，原文看不到）"
+        elif q:
+            tag += f"（引用「{q}」）"
     body = (e.get("text") or "").replace("\n", " ")
     if e.get("image") and "[图片]" not in body and "表情" not in body:
         body = ("[图片] " + body).strip()
@@ -564,6 +594,38 @@ def _fmt_entry(e: dict) -> str:
     if e.get("owner"):
         who += "【主人】"
     return f"m{e['mid']} [{clock}] {who}{tag}：{body or '[消息]'}"
+
+
+def _is_pure_image_entry(e: dict) -> bool:
+    if e.get("note") or e.get("sys") or e.get("at") or e.get("reply"):
+        return False
+    t = (e.get("text") or "").strip()
+    return bool(e.get("image") and t in ("", "[图片]")) or t == "[图片]"
+
+
+def _fmt_entries(rows: list[dict]) -> list[str]:
+    """同一群友连续刷 >=4 张纯图片时自动折叠中间项，既省上下文又保留首尾消息编号供看图。"""
+    out: list[str] = []
+    i = 0
+    n = len(rows)
+    while i < n:
+        e = rows[i]
+        if _is_pure_image_entry(e):
+            uid_key = e.get("uid") or e.get("name") or "?"
+            j = i + 1
+            while j < n and _is_pure_image_entry(rows[j]) and (rows[j].get("uid") or rows[j].get("name") or "?") == uid_key:
+                j += 1
+            count = j - i
+            if count >= 4:
+                who = f"{e['name']}({e['uid'][-4:]})" if e.get("uid") else e.get("name", "?")
+                out.append(_fmt_entry(rows[i]))
+                out.append(f"（… {who} 连续刷了 {count} 张图片，已折叠中间 {count - 2} 张 …）")
+                out.append(_fmt_entry(rows[j - 1]))
+                i = j
+                continue
+        out.append(_fmt_entry(e))
+        i += 1
+    return out
 
 
 def _persona(sid: str) -> str:
@@ -578,18 +640,55 @@ def _persona(sid: str) -> str:
         return SIM2_RULES
 
 
+# 二代会话里本来就有她说过的话，这段不用再给
+_DYN_SKIP = ("你最近几次说过的话",)
+
+
 def _dynamic(st: GState, text: str) -> str:
-    """一代那套「此刻」提示（心情、长期记忆、纪要、和这个人的关系……），只取每轮变的部分。"""
+    """一代那套「此刻」提示（心情、长期记忆、纪要、和这个人的关系……），只取每轮变的部分。
+
+    省钱：DSH 会话会把每轮的提示都存下来，下次醒来整段重发。所以同一个会话里已经给过的段落不再重发，
+    只给新出现 / 变了的段落，总长不超过 AI_CHAT_SIM2_DYNAMIC_MAX 字（换新会话时清空，第一轮整段给全、不设上限）。
+    超出上限没给的段落不算「给过」，下一轮接着给。"""
     from . import prompting
 
     if st.event is None:
         return ""
     try:
         full = prompting.build_system_prompt(st.event, st.gid, text, None, "", None)
-        return prompting.split_dynamic(full)[1][:6000]
+        dyn = prompting.split_dynamic(full)[1][:6000]
     except Exception as e:  # noqa: BLE001
         logger.debug(f"[二代仿真] 动态提示失败: {e}")
         return ""
+    # 新会话第一轮（本子是空的）整段都给，不受字数上限：她得先知道自己的心情、记得的人和事
+    limit = 6000 if not st.dyn_seen else brain.dsh_settings()["dynamic_max"]
+    return _dynamic_delta(st, dyn, limit)
+
+
+def _dynamic_delta(st: GState, dyn: str, limit: int) -> str:
+    if limit <= 0:
+        return ""
+    import hashlib as _h
+
+    out, used = [], 0
+    for para in re.split(r"\n\s*\n", dyn or ""):
+        para = para.strip()
+        if not para or para.startswith(_DYN_SKIP):
+            continue
+        key = _h.md5(para.encode("utf-8", "replace")).hexdigest()[:16]
+        if key in st.dyn_seen:
+            continue
+        if used + len(para) > limit:
+            if not out and limit >= 200:  # 一段就超长：截一截也给
+                para = para[:limit]
+            else:
+                continue
+        out.append(para)
+        used += len(para) + 2
+        st.dyn_seen.add(key)
+    if len(st.dyn_seen) > 600:
+        st.dyn_seen.clear()
+    return "\n\n".join(out)
 
 
 def _sticker_hint() -> str:
@@ -606,18 +705,26 @@ def _group_prompt(st: GState, reason: str, new: list) -> str:
     week = "一二三四五六日"[now.tm_wday]
     parts = [f"【现在】{time.strftime('%Y-%m-%d %H:%M', now)} 星期{week}", f"【为什么醒来】{REASON_TEXT.get(reason, reason)}"]
     if not st.bootstrapped:
+        st.dyn_seen.clear()  # 新会话：状态重新给全
         hist = memory.get_history(st.gid)
         mids = {x["mid"] for x in new}
         older, _ = transcript.render(hist, exclude_mids=mids, limit=brain.dsh_settings()["recap_lines"])
         if older.strip():
             parts.append("【之前的聊天（你可能已经忘了细节）】\n" + older)
         st.bootstrapped = True
-    parts.append("【你上次看完之后的新消息】\n" + "\n".join(_fmt_entry(x) for x in new[-40:]))
+    if new:
+        parts.append("【你上次看完之后的新消息】\n" + "\n".join(_fmt_entries(new[-40:])))
+    else:
+        parts.append("【你上次看完之后的新消息】（没有新消息）")
     if len(new) > 40:
         parts.append(f"（更早还有 {len(new) - 40} 条没细看）")
-    dyn = _dynamic(st, new[-1].get("text", ""))
+    dyn = _dynamic(st, new[-1].get("text", "") if new else "")
     if dyn:
-        parts.append("【此刻的你】\n" + dyn)
+        parts.append("【你现在的状态（只作背景参考，别把状态说明词照抄进回复）】\n" + dyn)
+    # 抖S小本本已经在上面的「状态」里了（同一会话给过就不重发），这里不再单独塞一遍
+    if getattr(st, "persona_just_updated", False):
+        st.persona_just_updated = False
+        parts.append("【人设热更新提示】主人在控制面板刚刚热更新了你的人设提示词，请从现在起立即按最新人设说话。")
     try:
         from ...services import annoy
 
@@ -642,13 +749,24 @@ def _group_prompt(st: GState, reason: str, new: list) -> str:
     if time.time() < st.nap_until:
         parts.append(f"【你在潜水】你说过要少说话（到 {time.strftime('%H:%M', time.localtime(st.nap_until))}）：被叫到就回一句，别展开；"
                      "主人让你恢复说话才 nap minutes=0。")
-    if reason == "back":
+    try:
+        from . import commit
+
+        promised = commit.take_note(st.gid) if commit.enabled() else ""
+    except Exception:  # noqa: BLE001
+        promised = ""
+    if promised:
+        parts.append(promised)
+    if reason == "promise":
+        if not promised:
+            parts.append("（刚才想起来的事好像已经办过了，没什么要说的就 qq_silence。）")
+    elif reason == "back":
         parts.append(st.back_note or "你刚刷完 B 站回来，看看群里说了什么，想回就回。")
         st.back_note = ""
     elif reason == "limited" or st.limit_notes:
         parts.append(_limit_prompt(st))
     elif reason in AT_TYPES:
-        parts.append("有人在找你，正常回应（用 qq_say），一两条就够。")
+        parts.append("有人在找你，按你自己的性格和心情回应（用 qq_say，发一条还是连发多条完全随你，想顺手发图/截屏/画图/操作电脑也随你）。")
     elif reason == "follow":
         parts.append("先看这些新消息是不是在接你的话：是就自然接一句，不是或者没必要接就 qq_silence。")
     else:
@@ -685,6 +803,43 @@ def _feel_notes(st: GState, reason: str, new: list) -> str:
     return "\n\n".join(out)
 
 
+_GATE_YES = re.compile(r"^\s*(是|对|yes|y)\b", re.I)
+
+
+async def _follow_gate(st: GState, new: list) -> tuple[bool, str]:
+    """她刚说完话、群里又来了消息：先便宜地判断是不是在接她的话，不是就不叫醒主模型。
+
+    免费模型（AI_CHAT_FREE_ENABLED）答「是 / 否」；免费线路不通时 llm.chat 会自己换付费（几百 token，不到一厘）。
+    模型都不可用：只有她说完 30 秒内、话里带「你」或问号才醒。"""
+    now = time.time()
+    msgs = [x for x in new if not x.get("bot") and not x.get("note") and not x.get("sys")]
+    if not msgs:
+        return False, "只有机器人 / 通知"
+    if any(x.get("owner") for x in msgs):
+        return True, ""  # 主人说话总要看一眼
+    mine = [str(t)[:80] for t in memory.recent_assistant_messages(st.gid, 3)]
+    lines = "\n".join(f"{x.get('name', '?')}：{(x.get('text') or ('[图片]' if x.get('image') else ''))[:120]}"
+                      for x in msgs[-6:])
+    name = (roles.aliases() or ["她"])[0]
+    prompt = (f"QQ 群里有个成员叫「{name}」。她刚才说：\n" + ("\n".join(mine) or "（没记下）")
+              + f"\n\n之后群里的新消息：\n{lines}\n\n这些新消息里，有没有人在接「{name}」的话、回应她、问她，"
+              f"或者明显想让她接话？群友之间自己聊的不算。只回答一个字：是 或 否")
+    try:
+        ans = await core_llm.chat([{"role": "user", "content": prompt}], timeout=10, max_tokens=8, temperature=0)
+        if _GATE_YES.match(ans or "") or (ans or "").strip().startswith("是"):
+            return True, ""
+        st.gate_until = now + 12
+        return False, "新消息不是在接她的话"
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[二代仿真] 接话闸门判断失败: {e}")
+    recent = now - st.last_said <= 30
+    if recent and any(("你" in (x.get("text") or "")) or ("?" in (x.get("text") or "")) or ("？" in (x.get("text") or ""))
+                      for x in msgs):
+        return True, ""
+    st.gate_until = now + 12
+    return False, "判断不了，先不醒"
+
+
 ROTATE_MIN_RUNS = 3  # 新会话至少跑这么多轮才考虑再换（底子本身就大时不至于每轮都换）
 
 
@@ -698,6 +853,8 @@ def _maybe_rotate(st: GState, res: dict, ds: dict) -> bool:
     st.runs_in_session += 1
     limit = int(ds.get("context_max_k") or 0) * 1000
     used = context_tokens(res)
+    if used:
+        st.ctx_k = round(used / 1000)
     if not limit or used < limit or st.runs_in_session < ROTATE_MIN_RUNS:
         return False
     engine.reset_session(st.sid, st.gid)
@@ -709,10 +866,43 @@ def _maybe_rotate(st: GState, res: dict, ds: dict) -> bool:
     return True
 
 
-def _record_usage(res: dict, tag: str, effort: str) -> None:
+CUSTOM_TAG = "·外接"
+
+
+def _record_usage(res: dict, tag: str, effort: str) -> list:
+    """记账；返回这一轮每次请求的 {hit, miss, out, cost}（给按群 / 逐轮的花费看板）。"""
     eff = effort
+    price, model = None, engine.deepseek_model()
+    if res.get("route") == "custom":
+        cs = engine.custom_settings()
+        price, model, tag, eff = (cs["price_hit"], cs["price_miss"], cs["price_out"]), cs["model"], tag + CUSTOM_TAG, "off"
+    out = []
     for row in res.get("usage") or []:
-        core_llm.record_usage(row, tag, effort=eff, model=engine.model())
+        r = core_llm.record_usage(row, tag, effort=eff, model=model, price=price)
+        if r:
+            out.append(r)
+    return out
+
+
+def _sync_route(st: GState) -> str:
+    """外接模型 / DeepSeek 换线路（或换了外接模型配置）时这个群开新会话，下一轮带上最近的聊天接着聊。"""
+    r = engine.pick_route()
+    sig = engine._custom_cfg_sig() if r == "custom" else ""
+    prev_sig = getattr(st, "custom_sig", "")
+    if (st.route and st.route != r) or (r == "custom" and prev_sig and prev_sig != sig):
+        engine.reset_session(st.sid, st.gid)
+        st.bootstrapped = False
+        st.runs_in_session = 0
+        logger.info(f"[二代仿真] 群{st.gid} 换到{'外接模型' if r == 'custom' else ' DeepSeek'}，开新会话")
+    st.route = r
+    st.custom_sig = sig
+    return r
+
+
+def _note_route_result(res: dict) -> None:
+    if res.get("custom_down"):
+        until = time.strftime("%H:%M", time.localtime(engine.custom_down_until()))
+        logger.warning(f"[二代仿真] 外接模型这轮出错，{until} 之前先用 DeepSeek：{str(res.get('error') or '')[:120]}")
 
 
 async def _run_group(st: GState, reason: str) -> None:
@@ -725,43 +915,50 @@ async def _run_group(st: GState, reason: str) -> None:
     if humanize.skip_if_limited(st.gid, "二代仿真"):
         return
     new = [x for x in st.unread if x["seq"] > st.seen_seq]
-    if not new:
+    if not new and reason != "promise":
         return
     ds = brain.dsh_settings()
-    trigger = next((x for x in reversed(new) if x.get("at")), new[-1])
-    effort = brain.effort_for(st.gid, "at" if reason in AT_TYPES or reason in ("back", "limited") else "random",
-                              trigger.get("text", ""))
-    effort_hi = brain.escalated_effort(st.gid, effort)
+    if reason in ("follow", "random", "idle"):
+        ok, why = budget.allow(reason, st.gid)
+        if ok and reason == "follow" and brain.follow_gate():
+            ok, why = await _follow_gate(st, new)
+        if not ok:
+            logger.info(f"[二代仿真] 群{st.gid} 这次不叫醒模型（{REASON_TEXT.get(reason, reason)}）：{why}")
+            return
+    trigger = next((x for x in reversed(new) if x.get("at")), new[-1] if new else {"text": ""})
+    kind = "at" if reason in AT_TYPES or reason in ("back", "limited", "promise") else ("follow" if reason == "follow" else "random")
+    effort = budget.effort_cap(brain.effort_for(st.gid, kind, trigger.get("text", "")), st.gid)
+    effort_hi = budget.effort_cap(brain.escalated_effort(st.gid, effort), st.gid)
     run_id = uuid.uuid4().hex
-    ctx = RunCtx("group", st.sid, st.gid, cursor=new[-1]["seq"],
+    ctx = RunCtx("group", st.sid, st.gid, cursor=new[-1]["seq"] if new else st.seen_seq,
                  at_mids=[x["mid"] for x in new if x.get("at") and x.get("mid")], reason=reason,
                  trigger_text=trigger.get("text", ""))
-    try:
-        from ...services import slang
-
-        if slang.is_pure_callback(trigger.get("text", "")):
-            ctx.max_lines = 1  # 「申请起飞」→「允许起飞」，一句就收，多说像在加戏
-    except Exception:  # noqa: BLE001
-        pass
-    if time.time() < st.nap_until or reason == "limited":
-        ctx.max_lines = 1  # 说好了少说话 / 今天被找烦了：只回一句
-    else:
-        try:
-            from ...services import annoy
-
-            if trigger.get("uid") and annoy.short_reply(trigger["uid"]):
-                ctx.max_lines = 1  # 被这个人烦得不行：一句打发
-        except Exception:  # noqa: BLE001
-            pass
+    if time.time() < st.nap_until:
+        ctx.max_lines = 1  # 自己主动在潜水 nap 期间被艾特：简短回一句
+    _sync_route(st)
+    if st.route == "custom":
+        ctx.nags = 1  # 外接模型直出清洗，不因套路句式打回重跑一轮
+        if reason in ("random", "idle") and int((engine.health(0.4) or {}).get("busy") or 0) > 0:
+            return  # 外接单会话正在忙别的群时，跳过后台随手刷群
+    cur_persona = _persona(st.sid)
+    import hashlib as _hashlib
+    p_hash = _hashlib.md5(cur_persona.encode("utf-8", "replace")).hexdigest()
+    prev_hash = getattr(st, "persona_hash", "")
+    if prev_hash and prev_hash != p_hash:
+        st.persona_just_updated = True
+        logger.info(f"[二代仿真] 群{st.gid} 检测到角色提示词已在控制面板热更新，立即生效")
+    st.persona_hash = p_hash
     prompt = _group_prompt(st, reason, new)
-    st.seen_seq = new[-1]["seq"]
+    if new:
+        st.seen_seq = new[-1]["seq"]
     st.last_active = time.time()
-    payload = {"session_id": engine.session_id(st.sid, st.gid), "run_id": run_id, "persona": _persona(st.sid),
+    payload = {"session_id": engine.session_id(st.sid, st.gid), "run_id": run_id, "persona": cur_persona,
                "prompt": prompt, "max_steps": ds["max_steps"], "effort": effort, "effort_hi": effort_hi,
-               "timeout": ds["timeout"]}
+               "timeout": ds["timeout"], "end_after_say": bool(ds["end_after_say"])}
     _runs[run_id] = ctx
     logger.info(f"[二代仿真] 群{st.gid} 醒来（{REASON_TEXT.get(reason, reason)}），看 {len(new)} 条新消息"
-                + (f"，思考：{brain.EFFORT_NAMES.get(effort, effort)}" if effort != "off" else ""))
+                + ("，用外接模型" if st.route == "custom"
+                   else (f"，思考：{brain.EFFORT_NAMES.get(effort, effort)}" if effort != "off" else "")))
     t0 = time.time()
     try:
         res = await asyncio.to_thread(engine.run, payload, ds["timeout"])
@@ -771,12 +968,38 @@ async def _run_group(st: GState, reason: str) -> None:
         res = {"ok": False, "error": engine.safe_error(e)}
     finally:
         _runs.pop(run_id, None)
-    _record_usage(res, "dsh.sim2", effort_hi if res.get("escalated") else effort)
+    cost_rows = _record_usage(res, "dsh.sim2", effort_hi if res.get("escalated") else effort)
+    _note_route_result(res)
+    if not res.get("ok") and res.get("custom_down") and ctx.said == 0:
+        _sync_route(st)
+        run_id = uuid.uuid4().hex
+        payload = {**payload, "session_id": engine.session_id(st.sid, st.gid), "run_id": run_id,
+                   "prompt": _group_prompt(st, reason, new)}
+        _runs[run_id] = ctx
+        logger.info(f"[二代仿真] 群{st.gid} 外接模型不可用，本轮立即切到 DeepSeek 兜底")
+        try:
+            res = await asyncio.to_thread(engine.run, payload, ds["timeout"])
+        except engine.AgentUnavailable as e:
+            res = {"ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            res = {"ok": False, "error": engine.safe_error(e)}
+        finally:
+            _runs.pop(run_id, None)
+        cost_rows += _record_usage(res, "dsh.sim2", effort_hi if res.get("escalated") else effort)
     _maybe_rotate(st, res, ds)
+    rounds.add(st.gid, reason=reason, rows=cost_rows, effort=effort_hi if res.get("escalated") else effort,
+               steps=int(res.get("steps") or 0), tools=res.get("tools") or [], said=ctx.said,
+               silent=bool(res.get("silent")), ok=bool(res.get("ok")), seconds=time.time() - t0, route=st.route)
     if not res.get("ok"):
         err = str(res.get("error") or res.get("finish_reason") or "未知错误")
         logger.warning(f"[二代仿真] 群{st.gid} 这轮失败（{time.time() - t0:.0f}s）：{err}")
         _note_failure(err)
+        try:
+            from . import fun_features
+            if fun_features.is_balance_error(err):
+                _spawn(fun_features.maybe_alert_low_balance(err))
+        except Exception:  # noqa: BLE001
+            pass
         if reason in AT_TYPES and ctx.said == 0 and ds["fallback"] and st.fallback is not None:
             fb, st.fallback = st.fallback, None
             logger.info(f"[二代仿真] 群{st.gid} 回退到一代回复")
@@ -788,8 +1011,9 @@ async def _run_group(st: GState, reason: str) -> None:
     _note_ok()
     st.fallback = None
     final = _clean_final(str(res.get("final_response") or ""))
-    if ctx.said == 0 and not res.get("silent") and reason in AT_TYPES and final:
-        # 模型把话写在了正文里没调 qq_say：被叫到时替它发出去
+    if ctx.said == 0 and not res.get("silent") and (reason in AT_TYPES or reason == "follow") and final:
+        # 模型把话写在了正文里没调 qq_say：被叫到或接话时替它发出去
+        ctx.nags = 1
         await _say(ctx, [final])
     if ctx.said or ctx.stickers:
         st.last_active = time.time()
@@ -820,7 +1044,16 @@ def _keep_quiet_promise(st: GState, ctx: RunCtx, reason: str, tools) -> None:
                 f"{time.strftime('%H:%M', time.localtime(st.nap_until))}，期间只有艾特才醒")
 
 
-_TOOLISH = re.compile(r"qq_\w+|sticker_\w+|工具|调用|消息编号|m\d{5,}")
+# 消息编号：SnowLuma 的 message_id 是有符号 int32（负数合法），不能用 isdigit() 判断
+_MID_RE = re.compile(r"-?\d+")
+
+
+def _is_mid(s: str) -> bool:
+    t = str(s or "").strip()
+    return bool(_MID_RE.fullmatch(t)) and int(t) != 0
+
+
+_TOOLISH = re.compile(r"qq_\w+|sticker_\w+|工具|调用|消息编号|m-?\d{5,}")
 
 
 def _clean_final(text: str) -> str:
@@ -857,7 +1090,7 @@ def _split_lines(messages) -> list[str]:
             line = line.strip()
             if line:
                 out.append(line[:300])
-    return out[:20]  # 条数她自己定；只防模型抽风一次刷几十条
+    return out[:50]  # 条数她自己定；给她最大自由度
 
 
 _TAIL_DOT = re.compile(r"(?<![。.])[。.]$")
@@ -869,6 +1102,8 @@ def _polish(line: str) -> str:
 
     line = deai.strip_markdown(deai.soft_clean(line)).strip()
     line = re.sub(r"^\s*(?:[-*•]|\d+[.、)])\s+", "", line)
+    line = re.sub(r"[，,、\s…—]*(?:[（(]?\s*(?:改口|停顿|嘴硬|傲娇|小声)\s*[）)]?)[。！!？?~～…\s]*$", "", line).strip()
+    line = re.sub(r"^嗯哼，此刻", "嗯哼，", line)
     if not re.search(r"\d\.$|\.\w+$", line):
         line = _TAIL_DOT.sub("", line)
     return line.strip()
@@ -925,6 +1160,33 @@ def _strip_actions(line: str) -> str:
         return line
 
 
+_CONTACT_NOW = re.compile(
+    r"(?:(?:我|本芙|芙芙)?(?:现在(?:就)?|这就|马上|立刻|立即)(?:去|来)?|"
+    r"我(?:这就|就|得|要)?去|那(?:我)?(?:就)?去)"
+    r"(?:找|叫|喊|艾特)(?:一下|一声)?\s*([^，,。！？!?；;\n]{1,40})"
+)
+
+
+def _contact_now_target(text: str) -> str:
+    """只识别自己当下要找人的承诺；引用、否定、以后再找和找物品不算。"""
+    text = re.sub(r"`[^`\n]*`|[「『“\"][^」』”\"\n]*[」』”\"]", "", text or "")
+    for clause in re.split(r"[，,。！？!?；;\n]", text):
+        for match in _CONTACT_NOW.finditer(clause):
+            before = clause[:match.start()]
+            if re.search(r"明天|后天|下次|改天|回头|晚点|等会|稍后|之前|刚才|(?:他|她|你|有人)说", before):
+                continue
+            if re.search(r"(?:不|别|不用|不要|不想|不会|没说).{0,4}$", before):
+                continue
+            target = match.group(1).strip().lstrip("@")
+            if re.match(r"原图|图片|壁纸|攻略|教程|资料|文件|视频|素材|答案|东西|工作|宝箱|NPC|npc|bug", target):
+                continue
+            for pronoun in ("主人", "群主", "特别关照的人", "你", "您", "他", "她", "TA", "ta", "对方"):
+                if target.startswith(pronoun):
+                    return pronoun
+            return target
+    return ""
+
+
 async def _say(ctx: RunCtx, messages, reply_to: str = "", at: str = "") -> dict:
     from nonebot.adapters.onebot.v11 import Message, MessageSegment
 
@@ -960,6 +1222,17 @@ async def _say(ctx: RunCtx, messages, reply_to: str = "", at: str = "") -> dict:
         lines, act = _parse_actions([_polish(x) for x in lines], ctx.gid)
         lines = [_LEFTOVER.sub("", x).strip() for x in lines]
         lines = [x for x in lines if x]
+        # 旧 AT 标记也走同一条真实发送路径：先认出人，再把艾特和话一起发。
+        # 不能先说「这就找他」，最后才发现标记被主动发言的门槛吞掉了。
+        if act is not None and act.at_target and not at:
+            at = act.at_target
+            if act.at_content:
+                lines.append(_polish(_strip_actions(act.at_content)))
+            act.at_target = act.at_content = ""
+            if not act.has_side_effects():
+                act = None
+            if ctx.max_lines:
+                lines = lines[:max(0, ctx.max_lines - ctx.said)]
     if not lines and act is None:
         return {"ok": False, "sent": 0, "reason": "没有要发的内容"}
     bot = bot_for(self_id=ctx.sid)
@@ -980,22 +1253,74 @@ async def _say(ctx: RunCtx, messages, reply_to: str = "", at: str = "") -> dict:
     to_mid = reply_to
     if reply_to and not _keep_quote(st, reply_to):
         reply_to = ""  # 真人回人很少点引用：偶尔才引用（隔得远、不引用看不懂是回谁时照样引用）
+    if ctx.kind == "group" and not at:
+        target = _contact_now_target("\n".join(lines))
+        if target in ("你", "您"):
+            # 「你」只按明确回复对象认，不能顺手把任何承诺都艾特给主人。
+            mids = [to_mid] if to_mid else list(reversed(ctx.at_mids))
+            row = next((e for mid in mids for e in reversed(st.unread) if str(e.get("mid")) == str(mid) and e.get("uid")), None)
+            at = str(row["uid"]) if row else ""
+            if not at and ctx.reason in AT_TYPES and st.event is not None:
+                at = str(getattr(st.event, "user_id", "") or "")
+        elif target not in ("他", "她", "TA", "ta", "对方"):
+            at = target
+        if target and not at:
+            return {"ok": False, "sent": 0, "reason": "这句还没发：你说现在去找人，就必须真实艾特。别猜「他/她」是谁，确认目标后把 QQ 号、消息编号或群昵称填进 qq_say.at，和这句话一起发；认不清就先问清楚，不能光说去找。"}
     at_uid = await _resolve_at(ctx, st, at) if at else ""
     if at and not at_uid:
-        return {"ok": False, "sent": 0, "reason": f"没找到「{at}」是谁，没发。at 填 QQ 号、对方那条消息的编号，或者群昵称"}
+        why = f"没找到「{at}」是谁，整句都没发。at 填 QQ 号、对方那条消息的编号，或者群昵称；别把没发出的艾特说成已经去找了"
+        return {"ok": False, "sent": 0, "reason": why, "done": why}
+    if act is not None and act.at_target and not await _resolve_at(ctx, st, act.at_target):
+        return {"ok": False, "sent": 0, "reason": f"没找到「{act.at_target}」是谁，整句还没发。请确认真实群友再艾特"}
     sent = 0
+    # 若 qq_say 里夹带了 B 站视频链接，自动升级为先发「QQ小程序 哔哩哔哩卡片」，再把剩下的话分气泡发在卡片下方
+    _bili_url_m = next(
+        (
+            re.search(r"https?://(?:(?:www\.|m\.)?bilibili\.com/video/BV[0-9A-Za-z]{10}[0-9A-Za-z_\-/?=&]*|b23\.tv/[0-9A-Za-z_\-]+)", x, re.I)
+            for x in lines
+            if re.search(r"https?://(?:(?:www\.|m\.)?bilibili\.com/video/BV[0-9A-Za-z]{10}|b23\.tv/)", x, re.I)
+        ),
+        None,
+    )
+    if _bili_url_m is not None:
+        from ...services.bilibili import storyboard
+
+        bili_raw_url = _bili_url_m.group(0)
+        cleaned_lines = [
+            re.sub(
+                r"https?://(?:(?:www\.|m\.)?bilibili\.com/video/[0-9A-Za-z_\-/?=&]+|b23\.tv/[0-9A-Za-z_\-/?=&]+)",
+                "",
+                x,
+                flags=re.I,
+            ).strip()
+            for x in lines
+        ]
+        cleaned_lines = [x for x in cleaned_lines if x]
+        info = await storyboard.resolve_video_card_info(bili_raw_url)
+        if info.get("ok"):
+            ark_json = await storyboard.build_miniapp_ark(bot, info)
+            if ark_json:
+                card_res = await sender(Message(MessageSegment.json(data=ark_json)))
+                if card_res is not None:
+                    sent += 1
+                    ctx.said += 1
+                    st.last_said = time.time()
+                    memory.add_message(gid, "assistant", f"[卡片] 哔哩哔哩（{info.get('title', info.get('bvid'))}） {info.get('bvid', '')}")
+                    lines = cleaned_lines
+                    if not lines and act is None:
+                        return {"ok": True, "sent": sent, "card": True, "bvid": info.get("bvid")}
     for idx, line in enumerate(lines):
         if idx or ctx.said:
             await humanize.pause(humanize.burst_gap(line))
         elif config.HUMANIZE:
             await humanize.pause(min(4.0, humanize.typing_seconds(line)))
         msg = Message()
-        if idx == 0 and reply_to.isdigit():
+        if idx == 0 and _is_mid(reply_to):
             msg += MessageSegment.reply(int(reply_to))
         if idx == 0 and at_uid:
             msg += MessageSegment.at(int(at_uid))
             msg += MessageSegment.text(" ")
-        if ctx.kind == "group" and not (idx == 0 and at_uid) and (idx == voice_idx or (idx == 0 and _asks_voice(ctx))):
+        if ctx.kind == "group" and not (idx == 0 and at_uid) and (idx == voice_idx or idx == 0):
             if await _try_voice(ctx, sender, gid, line, idx == voice_idx, voice_emo):
                 sent += 1
                 ctx.lines.append(line)
@@ -1011,6 +1336,7 @@ async def _say(ctx: RunCtx, messages, reply_to: str = "", at: str = "") -> dict:
         mid = str((result or {}).get("message_id") or "") if isinstance(result, dict) else str(getattr(result, "message_id", "") or "")
         if mid:
             st.my_mids.append(mid)
+            msgref.add(gid, mid, "你自己", line)
         memory.add_message(gid, "assistant", line, meta={"to": to_mid} if to_mid and idx == 0 else None)
         ctx.lines.append(line)
     ctx.said += sent
@@ -1020,13 +1346,39 @@ async def _say(ctx: RunCtx, messages, reply_to: str = "", at: str = "") -> dict:
         memory.mark_replied(gid, ctx.at_mids, "\n".join(ctx.lines)[:200])
     if sent:
         logger.info(f"[二代仿真] 群{gid} 说：" + " / ".join(lines[:sent]))
+        if ctx.kind == "group" and ctx.reason != "promise":
+            _note_commitment(st, ctx, lines[:sent], to_mid, at_uid)
     note = ""
     if act is not None:
         note = await _run_actions(ctx, st, act, sender)
         if not sent:
             st.last_said = time.time()
             return {"ok": not note, "sent": 0, "done": note or "已执行"}
-    return {"ok": True, "sent": sent, **({"note": note} if note else {})}
+    return {"ok": True, "sent": sent, **({"note": note, "keep_going": True} if note else {})}
+
+
+def _note_commitment(st: GState, ctx: RunCtx, lines: list, to_mid: str, at_uid: str) -> None:
+    """她答应了「等下 / 晚点 / 明天」做的事：记进承诺本子，到点叫醒她兑现（commit.py）。"""
+    try:
+        from . import commit
+
+        if not commit.enabled():
+            return
+        target = None
+        if to_mid:
+            target = next((x for x in reversed(st.unread) if x.get("mid") == to_mid), None)
+        if target is None and at_uid:
+            target = next((x for x in reversed(st.unread) if str(x.get("uid")) == str(at_uid)), None)
+        if target is None and ctx.at_mids:
+            target = next((x for x in reversed(st.unread) if x.get("mid") in ctx.at_mids), None)
+        for line in lines:
+            item = commit.add(st.gid, line, (target or {}).get("name", ""), (target or {}).get("uid", ""))
+            if item:
+                logger.info(f"[二代仿真] 群{st.gid} 她答应了事：「{item['text']}」，"
+                            f"{time.strftime('%m-%d %H:%M', time.localtime(item['due']))} 到点提醒她")
+                break
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[二代仿真] 记承诺失败: {e}")
 
 
 def _keep_quote(st: GState, mid: str) -> bool:
@@ -1042,6 +1394,11 @@ async def _resolve_at(ctx: RunCtx, st: GState, at) -> str:
     s = str(at or "").strip().lstrip("@").strip()
     if not s:
         return ""
+    # 特殊关系按配置 QQ 认，不让改成同名的人抢走艾特。
+    if s in ("主人", "群主") and config.GROUP_OWNER_QQ:
+        return str(config.GROUP_OWNER_QQ)
+    if s == "特别关照的人" and config.SPECIAL_QQ:
+        return str(config.SPECIAL_QQ)
     key = s.lstrip("mM#")
     for e in reversed(st.unread):
         if key and e.get("mid") == key and e.get("uid"):
@@ -1082,11 +1439,8 @@ async def _try_voice(ctx: RunCtx, sender, gid: int, line: str, marked: bool, emo
 
 
 async def _run_actions(ctx: RunCtx, st: GState, act, sender) -> str:
-    """指令标记：被叫到（艾特 / 引用 / 点名）的那一轮才执行，随手插话只剥掉不执行（同一代的规矩）。
-    返回给她看的说明（空 = 正常）；艾特找不到人时不在群里喊「没找到」，只告诉她。"""
-    if ctx.reason not in AT_TYPES or st.event is None:
-        logger.info(f"[二代仿真] 群{ctx.gid} 不是被叫到的一轮，指令标记只剥掉不执行")
-        return ""
+    """主动艾特任何群友不要求先被叫到；其他动作标记仍按原来的请求条件执行。
+    返回给她看的说明（空 = 正常），失败不向群里编造成功。"""
     note = ""
     try:
         from . import actions
@@ -1103,10 +1457,14 @@ async def _run_actions(ctx: RunCtx, st: GState, act, sender) -> str:
                     if act.at_content:
                         memory.add_message(int(ctx.gid), "assistant", act.at_content)
                     logger.info(f"[二代仿真] 群{ctx.gid} 艾特了 {act.at_target}（{uid}）：{act.at_content[:40]}")
+                else:
+                    note = "艾特这次没有发出去，别说已经找到 TA 了"
             else:
                 logger.info(f"[二代仿真] 群{ctx.gid} 艾特没找到「{act.at_target}」，不发")
                 note = f"群里没找到「{act.at_target}」，艾特没发出去（qq_say 的 at 可以填 QQ 号、对方消息的编号或群昵称）"
             act.at_target = act.at_content = ""
+        if ctx.reason not in AT_TYPES or st.event is None:
+            return note  # 只放开自主艾特，不顺带放开删词条、设精华等其他动作
         if act.has_side_effects():
             await actions.execute(act, st.event, ctx.gid, sender)
     except Exception as e:  # noqa: BLE001
@@ -1162,9 +1520,13 @@ async def _tool(ctx: RunCtx, name: str, args: dict) -> dict:
     gid = ctx.gid
     if name == "qq_say":
         return await _say(ctx, args.get("messages"), args.get("reply_to", ""), args.get("at", ""))
-    if ctx.kind == "agent" and name in AGENT_TOOLS:
+    if name in ("eagle_send", "web_screenshot", "draw_picture", "peek_owner_desktop", "note_black_book", "bili_watch", "bili_share"):
+        return await AGENT_TOOLS[name](ctx, args)
+    if name in AGENT_TOOLS:
         if not brain.agent_enabled():
             return {"ok": False, "reason": "Agent 已经被关掉了"}
+        if ctx.kind not in ("agent", "group"):
+            return {"ok": False, "reason": "这里用不了这个"}
         return await AGENT_TOOLS[name](ctx, args)
     if ctx.kind != "group" or gid is None:
         return {"ok": False, "reason": "这里用不了这个"}
@@ -1197,7 +1559,7 @@ async def _tool(ctx: RunCtx, name: str, args: dict) -> dict:
 
         mid = str(args.get("message") or "").lstrip("mM#")
         eid = EMOJI_IDS.get(str(args.get("emoji") or "").strip())
-        if not mid.isdigit() or eid is None:
+        if not _is_mid(mid) or eid is None:
             return {"ok": False, "reason": "消息编号或表情不对"}
         e = next((x for x in st.unread if x["mid"] == mid), {})
         ok = await reactions.react(bot_for(self_id=ctx.sid), mid, eid, gid, e.get("name", ""), e.get("text", ""), e.get("uid", ""))
@@ -1237,6 +1599,60 @@ async def _tool(ctx: RunCtx, name: str, args: dict) -> dict:
             return (cur + [{"fact": line, "ts": time.time()}])[-200:]
         db.update(FACT_NS, str(gid), _add, default=[])
         return {"ok": True}
+    if name == "meme_lookup":
+        from ...services import memewiki
+        from . import websearch
+
+        if not permissions.allowed(gid, "memewiki"):
+            return {"ok": False, "reason": "这个群没开查梗"}
+        web = websearch.lookup if websearch.enabled(gid, True) else None
+        res = await memewiki.lookup(str(args.get("term") or ""), gid, web=web)
+        daily_limits.track("memewiki", gid)
+        if not res["ok"]:
+            return {"ok": False, "reason": f"没查到「{res['term']}」，不知道就直说或者顺着猜"}
+        return {"ok": True, "term": res["term"], "meaning": res["text"][:1500],
+                "hint": "这是给你自己看的解释；在群里用你自己的话一两句说清，或者直接顺着这个梗接，别照抄、别说你查了"}
+    if name == "remind_later":
+        from . import commit
+
+        target = None
+        uid = await _resolve_at(ctx, st, args.get("who")) if str(args.get("who") or "").strip() else ""
+        if uid:
+            target = next((x for x in reversed(st.unread) if str(x.get("uid")) == uid), None)
+        else:
+            target = (next((x for x in reversed(st.unread) if not x.get("sys") and not x.get("bot") and re.search(r"提醒|叫我|喊我|记得", x.get("text") or "")), None)
+                      or next((x for x in reversed(st.unread) if not x.get("sys") and not x.get("bot") and x.get("uid")), None))
+            uid = str((target or {}).get("uid") or "")
+        asker = next((x for x in reversed(st.unread) if not x.get("sys") and not x.get("bot") and re.search(r"提醒|叫我|喊我|记得", x.get("text") or "")), None)
+        res = commit.add_reminder(gid, str(args.get("what") or ""), str(args.get("when") or ""),
+                                  (target or {}).get("name", "") or str(args.get("who") or "")[:20], uid,
+                                  (asker or {}).get("name", ""))
+        if not res.get("ok"):
+            return res
+        due = time.strftime("%m-%d %H:%M", time.localtime(res["due"]))
+        logger.info(f"[二代仿真] 群{gid} 记了提醒：{res['to'] or uid} {due}「{res['text']}」")
+        return {"ok": True, "due": due, "who": res["to"] or uid,
+                "hint": "记好了，到点会叫醒你。现在用 qq_say 随口应一声就行（别说「已添加提醒」这种话）"}
+    if name == "make_file":
+        from ...services import maker
+
+        if not permissions.allowed(gid, "maker"):
+            return {"ok": False, "reason": "这个群没开做文件，直接在群里简单说说就好"}
+        res = await maker.make(gid, str(args.get("title") or "文件"), str(args.get("request") or ""),
+                               str(args.get("format") or "md").lower())
+        if not res.get("ok"):
+            return res
+        bot = bot_for(self_id=ctx.sid)
+        try:
+            await bot.call_api("upload_group_file", group_id=int(gid), file=res["path"], name=res["name"])
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "reason": "文件写好了但没传上去：" + engine.safe_error(e)[:80]}
+        ctx.said += 1
+        memory.add_message(int(gid), "assistant", f"[文件] {res['name']}")
+        daily_limits.track("maker", gid)
+        logger.info(f"[二代仿真] 群{gid} 做了文件：{res['name']}（{res['chars']} 字）")
+        return {"ok": True, "sent": 1, "file": res["name"], "chars": res["chars"],
+                "hint": "文件已经发到群文件了，用 qq_say 简单说一声就行，别把内容再贴一遍"}
     if name == "web_lookup":
         from . import websearch
 
@@ -1360,7 +1776,7 @@ async def _bili_follow(ctx: RunCtx, st: GState, args: dict) -> dict:
 # ---------------- Agent 自己的工具（代替运行时里加载不了的 pwsh） ----------------
 IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 # 这些东西不让 Agent 碰（密钥 / 登录态 / 内核自己的钥匙），结果还可能被发到群里
-_SHELL_BLOCK = re.compile(r"(?i)(\.env\b|edge_profile|napcat|ipc\.key|cookies?\.(json|txt)|Login\s*Data|\.ssh\b)")
+_SHELL_BLOCK = re.compile(r"(?i)(\.env\b|edge_profile|napcat|ipc\.key|bili_credential|cookies?\.(json|txt)|Login\s*Data|\.ssh\b|Format-Volume|Clear-Disk)")
 
 
 def agent_cwd() -> Path:
@@ -1509,7 +1925,298 @@ async def _agent_send_file(ctx: RunCtx, args: dict) -> dict:
         return {"ok": False, "reason": "发送失败：" + engine.safe_error(e)[:200]}
 
 
-AGENT_TOOLS = {"run_shell": _agent_shell, "qq_send_image": _agent_send_image, "qq_send_file": _agent_send_file}
+async def _tool_eagle_send(ctx: RunCtx, args: dict) -> dict:
+    from . import commands
+
+    count = max(1, min(10, int(args.get("count") or 1)))
+    query = str(args.get("query") or "").strip()
+    bot = bot_for(self_id=ctx.sid)
+    if ctx.gid is not None:
+        sender = humanize.guarded(lambda m, g=int(ctx.gid): bot.send_group_msg(group_id=g, message=m), int(ctx.gid))
+    else:
+        sender = lambda m, u=int(ctx.uid): bot.send_private_msg(user_id=u, message=m)
+    try:
+        sent = await commands.send_eagle_images(sender, count, "dsh", query)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "reason": f"发图失败：{engine.safe_error(e)}"}
+    if not sent:
+        return {"ok": False, "reason": "图库里暂时没找到合适的图"}
+    ctx.said += sent
+    if ctx.gid is not None:
+        memory.add_message(int(ctx.gid), "assistant", f"（从图库发了{sent}张{query or ''}图）")
+    return {"ok": True, "sent": sent, "query": query}
+
+
+def _find_browser_exe() -> str:
+    for p in (
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    ):
+        if os.path.isfile(p):
+            return p
+    return ""
+
+
+def _capture_url_sync(url: str, out_path: str) -> tuple[bool, str]:
+    exe = _find_browser_exe()
+    if not exe:
+        return False, "电脑上没找到 Edge 或 Chrome 浏览器"
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    cmd = [
+        exe,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--hide-scrollbars",
+        "--window-size=1280,820",
+        "--virtual-time-budget=5000",
+        f"--screenshot={out_path}",
+        url,
+    ]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=35, creationflags=flags)
+    except subprocess.TimeoutExpired:
+        pass
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)[:160]
+    if os.path.isfile(out_path) and os.path.getsize(out_path) > 1024:
+        return True, out_path
+    return False, "网页截图未生成"
+
+
+async def _tool_web_screenshot(ctx: RunCtx, args: dict) -> dict:
+    import tempfile
+
+    url = str(args.get("url") or "").strip()
+    if not url or url.lower() in ("deepseek", "top_up", "余额", "充值"):
+        url = "https://platform.deepseek.com/top_up"
+    elif not re.match(r"^https?://", url, re.I):
+        url = "https://" + url
+    out_path = os.path.join(tempfile.gettempdir(), f"furina_web_{uuid.uuid4().hex[:10]}.png")
+    ok, info = await asyncio.to_thread(_capture_url_sync, url, out_path)
+    if not ok:
+        return {"ok": False, "reason": info}
+    send_to_group = args.get("send_to_group", True) is not False
+    if send_to_group:
+        res = await _agent_send_media(ctx, Path(out_path), "image")
+        if res.get("ok") and ctx.gid is not None:
+            memory.add_message(int(ctx.gid), "assistant", f"（截图并发送了网页：{url}）")
+        return {**res, "url": url, "path": out_path}
+    return {"ok": True, "url": url, "path": out_path, "sent": 0}
+
+
+def _run_draw_sync(code: str, out_path: str) -> tuple[bool, str]:
+    import sys
+
+    wrapper = (
+        "import os, math, random\n"
+        "from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageColor\n"
+        f"output_path = {out_path!r}\n"
+        + code
+        + "\n"
+        "if not os.path.isfile(output_path):\n"
+        "    for _v in ('img', 'image', 'im', 'canvas'):\n"
+        "        _obj = locals().get(_v)\n"
+        "        if hasattr(_obj, 'save'):\n"
+        "            _obj.save(output_path)\n"
+        "            break\n"
+    )
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        p = subprocess.run([sys.executable, "-c", wrapper], capture_output=True, text=True, timeout=30, creationflags=flags)
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)[:180]
+    if os.path.isfile(out_path) and os.path.getsize(out_path) > 50:
+        return True, out_path
+    err = (p.stderr or p.stdout or "画图脚本没有生成图片").strip()
+    return False, err[-240:]
+
+
+async def _tool_draw_picture(ctx: RunCtx, args: dict) -> dict:
+    import tempfile
+
+    code = str(args.get("code") or "").strip()
+    title = str(args.get("title") or "画板涂鸦").strip()
+    if not code:
+        return {"ok": False, "reason": "空的画图代码"}
+    if _SHELL_BLOCK.search(code):
+        return {"ok": False, "reason": "画图代码里包含不允许访问的敏感词"}
+    out_path = os.path.join(tempfile.gettempdir(), f"furina_draw_{uuid.uuid4().hex[:10]}.png")
+    ok, info = await asyncio.to_thread(_run_draw_sync, code, out_path)
+    if not ok:
+        return {"ok": False, "reason": f"画图报错：{info}"}
+    res = await _agent_send_media(ctx, Path(out_path), "image")
+    if res.get("ok") and ctx.gid is not None:
+        memory.add_message(int(ctx.gid), "assistant", f"（自己画了一张图并发到了群里：{title}）")
+    return {**res, "title": title, "path": out_path}
+
+
+async def _tool_peek_owner_desktop(ctx: RunCtx, args: dict) -> dict:
+    from . import fun_features
+
+    res = await fun_features.peek_owner_desktop()
+    if not res.get("ok"):
+        return res
+    shot = res.get("screenshot_path") or ""
+    sent = 0
+    if shot and os.path.isfile(shot):
+        mres = await _agent_send_media(ctx, Path(shot), "image")
+        if mres.get("ok"):
+            sent = 1
+            if ctx.gid is not None:
+                memory.add_message(int(ctx.gid), "assistant", f"（查岗截了主人当前的电脑桌面，前台窗口：{res.get('foreground')}）")
+    return {
+        "ok": True,
+        "sent": sent,
+        "foreground_window": res.get("foreground"),
+        "open_windows": res.get("windows"),
+        "privacy_skipped": res.get("privacy_skipped", False),
+    }
+
+
+async def _tool_note_black_book(ctx: RunCtx, args: dict) -> dict:
+    from . import fun_features
+
+    if not fun_features.black_book_enabled():
+        return {"ok": False, "reason": "小本本功能未开启"}
+    who = str(args.get("who") or "").strip()
+    nickname = str(args.get("nickname") or "").strip()
+    event = str(args.get("event") or "").strip()
+    uid = ""
+    if ctx.gid is not None:
+        st = _state(ctx.sid, int(ctx.gid))
+        uid = await _resolve_at(ctx, st, who) if who else ""
+    return fun_features.add_black_book_entry(who=who, nickname=nickname, event=event, gid=ctx.gid or "", uid=uid)
+
+
+async def _tool_bili_watch(ctx: RunCtx, args: dict) -> dict:
+    import tempfile
+    from ...services.bilibili import storyboard
+
+    raw_video = str(args.get("video") or "").strip()
+    if ctx.gid is not None:
+        st = _state(ctx.sid, int(ctx.gid))
+        mid = raw_video.lstrip("mM#")
+        if _is_mid(mid):
+            e = next((x for x in reversed(st.unread) if x.get("mid") == mid), None)
+            if e:
+                raw_video = str(e.get("full") or e.get("text") or raw_video)
+        elif not re.search(r"(BV[0-9A-Za-z]{10}|b23\.tv|bilibili\.com)", raw_video, re.I):
+            for x in reversed(st.unread):
+                t = str(x.get("full") or x.get("text") or "")
+                if re.search(r"(BV[0-9A-Za-z]{10}|b23\.tv|bilibili\.com)", t, re.I):
+                    raw_video = t
+                    break
+    at_raw = args.get("at_seconds")
+    at_list = None
+    if isinstance(at_raw, list):
+        at_list = []
+        for item in at_raw[:9]:
+            try:
+                at_list.append(max(0.0, float(item)))
+            except (TypeError, ValueError):
+                continue
+    vd = await storyboard.watch_video_detail(raw_video, at_seconds=at_list, with_vision=True, record_watched=True)
+    if not vd.get("ok"):
+        return vd
+    sheet_bytes = vd.pop("_sheet_bytes", b"")
+    sent = 0
+    if bool(args.get("send_storyboard")) and sheet_bytes:
+        out_path = os.path.join(tempfile.gettempdir(), f"furina_bili_sb_{uuid.uuid4().hex[:8]}.jpg")
+        try:
+            Path(out_path).write_bytes(sheet_bytes)
+            mres = await _agent_send_media(ctx, Path(out_path), "image")
+            if mres.get("ok"):
+                sent = 1
+                if ctx.gid is not None:
+                    memory.add_message(int(ctx.gid), "assistant", f"（发了《{vd['title'][:20]}》的 3×3 视频分镜九宫格图）")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[B站分镜] 发送分镜图失败: {e}")
+    if bool(args.get("share_card")):
+        sres = await _tool_bili_share(ctx, {"video": vd.get("bvid") or raw_video, "comments": args.get("comments") or []})
+        if sres.get("ok"):
+            sent += int(sres.get("sent") or 1)
+    vd["sent"] = sent
+    logger.info(f"[二代仿真] 看了B站视频 {vd.get('bvid')}《{vd.get('title', '')[:24]}》 (分镜={bool(sheet_bytes)}, 发图={sent})")
+    return vd
+
+
+async def _tool_bili_share(ctx: RunCtx, args: dict) -> dict:
+    from ...services.bilibili import storyboard
+
+    raw_video = str(args.get("video") or "").strip()
+    st = _state(ctx.sid, int(ctx.gid)) if ctx.gid is not None else None
+    if st is not None and raw_video:
+        mid = raw_video.lstrip("mM#")
+        if _is_mid(mid):
+            e = next((x for x in reversed(st.unread) if x.get("mid") == mid), None)
+            if e:
+                raw_video = str(e.get("full") or e.get("text") or raw_video)
+    info = await storyboard.resolve_video_card_info(raw_video)
+    if not info.get("ok"):
+        return info
+    comments = args.get("comments")
+    if not comments and args.get("comment"):
+        comments = args.get("comment")
+    at_raw = str(args.get("at") or "").strip()
+    at_uid = ""
+    owner_qq = str(config.GROUP_OWNER_QQ or "")
+    if at_raw in ("主人", "群主", "我超爱芙啦", "沃超爱芙啦", "主人") and owner_qq.isdigit():
+        at_uid = owner_qq
+    elif at_raw and st is not None:
+        at_uid = await _resolve_at(ctx, st, at_raw)
+    bot = bot_for(self_id=ctx.sid)
+    if ctx.gid is not None:
+        gid = int(ctx.gid)
+        sender = humanize.guarded(lambda m: bot.send_group_msg(group_id=gid, message=m), gid)
+    else:
+        sender = lambda m: bot.send_private_msg(user_id=int(ctx.uid), message=m)
+    res = await storyboard.send_bili_card_and_bubbles(
+        bot,
+        sender,
+        info,
+        comments=comments,
+        owner_qq=owner_qq,
+        at_uid=at_uid,
+        pause_fn=lambda b: humanize.pause(humanize.burst_gap(b)),
+    )
+    if res.get("ok"):
+        sent = int(res.get("sent") or 1)
+        ctx.said += sent
+        if ctx.gid is not None and st is not None:
+            gid = int(ctx.gid)
+            st.last_said = time.time()
+            bubbles = list(res.get("bubbles") or [])
+            bubbles_txt = "\n".join(bubbles)
+            memory.add_message(
+                gid,
+                "assistant",
+                f"[卡片] 哔哩哔哩（{info['title']}） {info['bvid']}" + (f"\n{bubbles_txt}" if bubbles_txt else ""),
+            )
+            ctx.lines.extend(bubbles or [f"[卡片] 哔哩哔哩（{info['title']}）"])
+            if ctx.at_mids:
+                memory.mark_replied(gid, ctx.at_mids, "\n".join(ctx.lines)[:200])
+        logger.info(
+            f"[二代仿真] 分享B站小程序卡片 {info.get('bvid')}《{info.get('title', '')[:24]}》 "
+            f"(card={res.get('card')}, sent={res.get('sent')}, bubbles={res.get('bubbles')})"
+        )
+    return res
+
+
+AGENT_TOOLS = {
+    "run_shell": _agent_shell,
+    "qq_send_image": _agent_send_image,
+    "qq_send_file": _agent_send_file,
+    "eagle_send": _tool_eagle_send,
+    "web_screenshot": _tool_web_screenshot,
+    "draw_picture": _tool_draw_picture,
+    "peek_owner_desktop": _tool_peek_owner_desktop,
+    "note_black_book": _tool_note_black_book,
+    "bili_watch": _tool_bili_watch,
+    "bili_share": _tool_bili_share,
+}
 
 
 async def _owner_task(ctx: RunCtx, st: GState, args: dict) -> dict:
@@ -1643,6 +2350,16 @@ async def run_agent(bot, owner_uid: str, text: str, group_id=None, raw: str | No
     logger.info(f"[Agent] 主人派活（{'群' + str(group_id) if group_id else '私聊'}），思考：{brain.EFFORT_NAMES.get(effort, effort)}")
     try:
         res = await asyncio.to_thread(engine.run, payload, ds["agent_timeout"])
+        _record_usage(res, "dsh.agent", effort)
+        _note_route_result(res)
+        if not res.get("ok") and res.get("custom_down") and ctx.said == 0:
+            _runs.pop(run_id, None)
+            run_id = uuid.uuid4().hex
+            payload = {**payload, "session_id": engine.session_id(sid, scope, channel="agent"), "run_id": run_id}
+            _runs[run_id] = ctx
+            logger.info("[Agent] 外接模型不可用，本轮立即切到 DeepSeek 兜底")
+            res = await asyncio.to_thread(engine.run, payload, ds["agent_timeout"])
+            _record_usage(res, "dsh.agent", effort)
     except engine.AgentUnavailable as e:
         res = {"ok": False, "error": str(e)}
     except Exception as e:  # noqa: BLE001
@@ -1650,7 +2367,6 @@ async def run_agent(bot, owner_uid: str, text: str, group_id=None, raw: str | No
     finally:
         _runs.pop(run_id, None)
         _agent_busy.discard(key)
-    _record_usage(res, "dsh.agent", effort)
     final = str(res.get("final_response") or "").strip()
     if not res.get("ok"):
         why = str(res.get("error") or res.get("cancelled") or res.get("finish_reason") or "未知错误")
@@ -1710,11 +2426,39 @@ def status() -> dict:
             "runs": len(_runs), "fail_until": _fail["until"]}
 
 
+PROMISE_JOB = "二代仿真承诺到点"
+
+
+async def promise_tick() -> None:
+    """她答应过的事到点了：叫醒那个群一次（二代仿真、聊天开着、没在刷 B 站）。"""
+    from . import commit
+
+    if not commit.enabled():
+        return
+    for gid in commit.groups_due():
+        pairs = [(sid, g, st) for (sid, g), st in list(_groups.items()) if str(g) == gid]
+        if not pairs:  # 刚重启、这个群还没人说过话：也要按时提醒
+            try:
+                pairs = [(str(sid), int(gid), _state(str(sid), int(gid))) for sid in list(get_bots())[:1]]
+            except Exception:  # noqa: BLE001
+                pairs = []
+        for sid, g, st in pairs:
+            if effective_mode(g) != "sim2" or not permissions.allowed(g, "chat", True) or away_info(sid):
+                continue
+            if not available():
+                continue
+            logger.info(f"[二代仿真] 群{g} 有提醒 / 答应过的事到点了，叫醒她")
+            _wake(st, "promise")
+            break
+
+
 @get_driver().on_startup
 async def _start_maint():
     scheduler.every(MAINT_JOB, 600, maintenance_tick, first_delay=180)
+    scheduler.every(PROMISE_JOB, 60, promise_tick, first_delay=90, quiet=True)
 
 
 @get_driver().on_shutdown
 async def _stop_maint():
     await scheduler.stop(MAINT_JOB)
+    await scheduler.stop(PROMISE_JOB)

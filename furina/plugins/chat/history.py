@@ -45,6 +45,7 @@ async def _seed_group_history(group_id: int):
         )
         msgs = (ret or {}).get("messages") or []
     except Exception as e:
+        _seeded_groups.discard(group_id)  # 没拉到：下次连上再试
         logger.warning(f"[AI聊天] 加载群{group_id}历史记录失败: {e}")
         return
     if not msgs:
@@ -89,10 +90,42 @@ async def _seed_group_history(group_id: int):
 
 
 
+_seed_tasks: set = set()
+
+
+async def _wait_account_confirmed(bot, step: float = 15.0, limit: float = 6 * 3600) -> bool:
+    """SnowLuma 账号确认前所有接口都被拦（返回 None）：这时灌历史只会得到空记录、还把群标成「已灌过」。
+    等面板确认后再灌；机器人断开或等太久就放弃（下次连上会重新来）。"""
+    import nonebot
+
+    from ...core import qq_transport
+
+    sid = str(getattr(bot, "self_id", "") or "")
+    waited = 0.0
+    logged = False
+    while not qq_transport.account_confirmed(sid):
+        if not logged:
+            logger.info("[AI聊天] 机器人账号还没在面板确认，确认后再加载群聊历史")
+            logged = True
+        if waited >= limit or sid not in nonebot.get_bots():
+            return False
+        await asyncio.sleep(step)
+        waited += step
+    return True
+
+
 @driver.on_bot_connect
 async def _load_history_on_connect(bot):
-    """机器人连上 NapCat 后，给每个群灌最近聊天记录（只灌一次，不阻塞）。"""
+    """机器人连上协议端后，给每个群灌最近聊天记录（只灌一次，不阻塞连接）。"""
+    task = asyncio.create_task(_seed_when_ready(bot))
+    _seed_tasks.add(task)
+    task.add_done_callback(_seed_tasks.discard)
+
+
+async def _seed_when_ready(bot):
     await asyncio.sleep(2)
+    if not await _wait_account_confirmed(bot):
+        return
     gids = []
     _live = await get_live_groups()
     for gid_str in sorted(_live):

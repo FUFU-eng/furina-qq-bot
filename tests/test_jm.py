@@ -69,6 +69,13 @@ class ResponseOkTest(unittest.TestCase):
         self.assertFalse(_response_ok(None))
         self.assertTrue(_response_ok("whatever"))
 
+    def test_unwrapped_snowluma_data_is_success(self):
+        """NoneBot 只返回 data：SnowLuma 上传成功是 {"file_id": ...}，失败会直接抛 ActionFailed。"""
+        from furina.plugins.jm import _response_ok
+
+        self.assertTrue(_response_ok({"file_id": "/abc-123"}))
+        self.assertTrue(_response_ok({}))
+
 
 class HistoryMatcherTest(unittest.TestCase):
     """核查群文件是否送达：要同时兼容适配器解包后的结构和 NapCat 原始信封。"""

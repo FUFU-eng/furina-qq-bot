@@ -68,11 +68,13 @@ class RolePageMixin:
         editor.addWidget(self.role_prompt_edit, 1)
         editor_actions = QHBoxLayout()
         editor_actions.setSpacing(8)
+        editor_actions.addWidget(self._tool_button("📕 芙芙的小本本", self._open_black_book_dialog))
         editor_actions.addStretch(1)
         editor_actions.addWidget(self._tool_button("打开提示词", self._role_open_prompt))
         editor_actions.addWidget(self._tool_button("复制提示词", self._role_copy_prompt))
+        editor_actions.addWidget(self._tool_button("同步内置最新人设", self._role_reset_builtin))
         editor_actions.addWidget(self._tool_button("设为当前角色", self._role_apply_current))
-        save_btn = self._tool_button("保存提示词", self._role_save)
+        save_btn = self._tool_button("保存提示词（热更新）", self._role_save)
         editor_actions.addWidget(save_btn)
         editor.addLayout(editor_actions)
         split.addWidget(editor_surface, 3)
@@ -276,10 +278,17 @@ class RolePageMixin:
 
     def _role_save(self):
         try:
-            # 面板开着期间，别处（网页面板、脚本、机器人）可能改过角色；这份内存列表是打开面板时读的。
-            # 保存时只写本窗口真正改过的角色，其余一律以库里最新的为准，免得整表覆盖把别人的修改冲掉。
             dirty = getattr(self, "_roles_dirty", set())
             deleted = getattr(self, "_roles_deleted", set())
+            if 0 <= self.role_current < len(self.roles_data):
+                cur_r = self.roles_data[self.role_current]
+                cur_r["name"] = self.role_name_edit.text().strip() or cur_r.get("name", "")
+                cur_r["prompt"] = self.role_prompt_edit.toPlainText()
+                _al = self.role_alias_edit.text().strip()
+                if _al or "aliases" in cur_r:
+                    cur_r["aliases"] = _al
+                if cur_r.get("id"):
+                    dirty.add(str(cur_r.get("id")))
             disk = {str(r.get("id", "")): r for r in self._load_roles() if r.get("id")}
             merged, known = [], set()
             for r in self.roles_data:
@@ -301,7 +310,9 @@ class RolePageMixin:
             cur = self.role_current
             if 0 <= cur < len(self.roles_data) and self.role_prompt_edit.toPlainText() != (self.roles_data[cur].get("prompt") or ""):
                 self._role_select(cur)
-            self.add_log("success", "[角色管理] 角色已保存，机器人热读取")
+            self.add_log("success", "[角色管理] 角色已保存并热更新，机器人下一条消息立即按新人设说话")
+            if hasattr(self, "_toast"):
+                self._toast("✓ 已保存并热更新（下一条消息立即生效）", "#3ecf8e")
             return True
         except Exception as e:
             self.add_log("error", f"[角色管理] 保存失败: {e}")
@@ -341,3 +352,119 @@ class RolePageMixin:
             return
         QApplication.clipboard().setText(prompt)
         self._toast("复制成功", "#3ecf8e")
+
+
+    def _role_reset_builtin(self):
+        if self.role_current < 0 or self.role_current >= len(self.roles_data):
+            if hasattr(self, "_toast"):
+                self._toast("请先选择一个角色", "#ffd166")
+            return
+        r = self.roles_data[self.role_current]
+        rid = str(r.get("id") or "furina")
+        try:
+            from panel.services import data as _pdata
+            updated = _pdata.reset_role_prompt(rid)
+            self._role_refresh_list()
+            for i, item in enumerate(self.roles_data):
+                if item.get("id") == updated.get("id"):
+                    self.role_list.setCurrentRow(i)
+                    self._role_select(i)
+                    break
+            self.add_log("success", f"[角色管理] 已同步「{updated.get('name')}」内置最新人设并热更新生效")
+            if hasattr(self, "_toast"):
+                self._toast("✓ 已同步内置最新人设并热更新生效", "#3ecf8e")
+        except Exception as e:
+            self.add_log("error", f"[角色管理] 同步内置人设失败: {e}")
+
+    def _open_black_book_dialog(self):
+        from PySide6.QtWidgets import (
+            QDialog, QHBoxLayout, QLabel as QL, QLineEdit as QLE,
+            QListWidget, QListWidgetItem, QPushButton as QPB, QVBoxLayout as QVL,
+        )
+        from panel.services import data as _pdata
+
+        dlg = QDialog(self)
+        _dp = dlg.palette(); _dp.setColor(QPalette.ColorRole.Window, QColor("#0a101e"))
+        dlg.setPalette(_dp); dlg.setAutoFillBackground(True)
+        dlg.setWindowTitle("📕 芙芙的抖S小本本 · 群友绰号与黑历史")
+        dlg.setFixedSize(640, 480)
+        dlg.setStyleSheet("background: #0a101e; color: #f4f7ff; font-family: 'Microsoft YaHei';")
+        v = QVL(dlg)
+        v.setContentsMargins(20, 18, 20, 18)
+        v.setSpacing(10)
+
+        hint = QL("芙芙在群里反杀顶嘴/开黄腔的群友时会自己往这里记一笔，以后聊天自动翻旧账嘲笑；你也可以手动帮她添几笔或删掉。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        v.addWidget(hint)
+
+        lw = QListWidget()
+        lw.setStyleSheet(
+            "QListWidget { background: #121e30; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 6px; font-size: 12px; }"
+            "QListWidget::item { padding: 8px 10px; border-radius: 7px; margin: 2px 0; }"
+            "QListWidget::item:selected { background: #223957; color: #ffffff; }"
+        )
+        v.addWidget(lw, 1)
+
+        def _reload():
+            lw.clear()
+            items = _pdata.black_book()
+            if not items:
+                it = QListWidgetItem("（小本本目前还是空的，等群友来招惹芙芙或者在下方手动记一笔吧~）")
+                it.setData(256, "")
+                lw.addItem(it)
+                return
+            for x in items:
+                who = x.get("who") or x.get("uid") or "某群友"
+                nick = f" · 外号「{x['nickname']}」" if x.get("nickname") else ""
+                ev = f" —— {x['event']}" if x.get("event") else ""
+                txt = f"【{who}】{nick}{ev}  ({x.get('date', '')})"
+                it = QListWidgetItem(txt)
+                it.setData(256, x.get("id", ""))
+                lw.addItem(it)
+
+        _reload()
+
+        add_row = QHBoxLayout()
+        add_row.setSpacing(8)
+        who_in = QLE(); who_in.setPlaceholderText("群友昵称或QQ"); who_in.setStyleSheet(self._line_edit_style())
+        nick_in = QLE(); nick_in.setPlaceholderText("芙芙给起的外号（如：白日梦小菜鸡）"); nick_in.setStyleSheet(self._line_edit_style())
+        ev_in = QLE(); ev_in.setPlaceholderText("黑历史/罪状（如：跟本神顶嘴被反杀）"); ev_in.setStyleSheet(self._line_edit_style())
+        add_row.addWidget(who_in, 2)
+        add_row.addWidget(nick_in, 2)
+        add_row.addWidget(ev_in, 3)
+        v.addLayout(add_row)
+
+        btns = QHBoxLayout()
+        del_btn = QPB("删除选中记录"); del_btn.setStyleSheet(self._mini_btn_style())
+        add_btn = QPB("记入小本本"); add_btn.setStyleSheet("background: #38bdf8; color: #08101d; border: none; border-radius: 8px; padding: 7px 16px; font-weight: bold;")
+        close_btn = QPB("关闭"); close_btn.setStyleSheet(self._mini_btn_style())
+
+        def _on_add():
+            w_txt = who_in.text().strip()
+            n_txt = nick_in.text().strip()
+            e_txt = ev_in.text().strip()
+            if not w_txt or not (n_txt or e_txt):
+                return
+            _pdata.add_black_book(w_txt, n_txt, e_txt)
+            who_in.clear(); nick_in.clear(); ev_in.clear()
+            _reload()
+
+        def _on_del():
+            cur = lw.currentItem()
+            if not cur:
+                return
+            eid = cur.data(256)
+            if eid:
+                _pdata.delete_black_book(str(eid))
+                _reload()
+
+        add_btn.clicked.connect(_on_add)
+        del_btn.clicked.connect(_on_del)
+        close_btn.clicked.connect(dlg.accept)
+        btns.addWidget(del_btn)
+        btns.addStretch(1)
+        btns.addWidget(add_btn)
+        btns.addWidget(close_btn)
+        v.addLayout(btns)
+        dlg.exec()

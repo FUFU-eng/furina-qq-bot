@@ -266,6 +266,18 @@ def build_system_prompt(event, group_id, current_text, quote, context_note, stic
     learned_summary = learning.get_group_summary(group_id, query=_lore_query)
     if learned_summary:
         system_prompt += "\n\n【你的长期记忆】" + learned_summary
+    try:
+        from . import fun_features
+        bb_note = fun_features.black_book_prompt_note(
+            group_id,
+            speaker_uid=str(getattr(event, "user_id", "") or ""),
+            speaker_name=_sender_name(event),
+            recent_text=_lore_query,
+        )
+        if bb_note:
+            system_prompt += "\n\n" + bb_note
+    except Exception:  # noqa: BLE001
+        pass
     # 情绪状态注入（心情影响语气，纯本地拼接零 token）
     try:
         if config.EMOTION_ENABLED:

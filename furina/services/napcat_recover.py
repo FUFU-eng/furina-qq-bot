@@ -17,17 +17,20 @@ import time
 import urllib.request
 from pathlib import Path
 
-from ..core import env, paths, winproc
+from ..core import env, paths, qq_transport, winproc
 
 STATE_PATH = paths.DATA_DIR / "napcat_recover.json"
 LOG_PATH = paths.LOG_DIR / "napcat-recover.log"
 _lock = threading.Lock()
+QR_GRACE_MIN = 10  # 刚出二维码后这么多分钟内，自动恢复不重启 NapCat
 
 
 # ---------------- 设置 ----------------
 
 def enabled() -> bool:
-    return env.get_bool("NAPCAT_AUTO_RECOVER", True)
+    # SnowLuma owns the client hook lifecycle. Never let the legacy recovery
+    # worker start/kill a second login client under a migrated transport.
+    return qq_transport.provider() == qq_transport.NAPCAT and env.get_bool("NAPCAT_AUTO_RECOVER", True)
 
 
 def delay_seconds() -> int:
@@ -44,6 +47,13 @@ def napcat_dir() -> Path | None:
 
 
 def http_port() -> int:
+    if qq_transport.provider() == qq_transport.SNOWLUMA:
+        from urllib.parse import urlsplit
+        try:
+            parsed=urlsplit(qq_transport.onebot_url())
+            return int(parsed.port or (443 if parsed.scheme == "https" else 80))
+        except (TypeError,ValueError):
+            return 0
     return env.get_int("NAPCAT_HTTP_PORT", 3000)
 
 
@@ -83,7 +93,13 @@ def status(qq: str = "") -> str:
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
     def get(action):
-        req = urllib.request.Request(f"http://127.0.0.1:{http_port()}/{action}", headers={"User-Agent": "FurinaRecover"})
+        if qq_transport.provider() == qq_transport.SNOWLUMA:
+            url=qq_transport.onebot_url().rstrip("/")+"/"+action.lstrip("/")
+            headers=qq_transport.onebot_headers()
+        else:
+            url=f"http://127.0.0.1:{http_port()}/{action}"
+            headers={"User-Agent": "FurinaRecover"}
+        req = urllib.request.Request(url, headers=headers)
         with opener.open(req, timeout=3) as resp:
             payload = json.loads(resp.read(1024 * 1024).decode("utf-8"))
         if not isinstance(payload, dict) or payload.get("retcode") != 0:
@@ -167,6 +183,9 @@ def relogin(qq: str, *, reason: str = "", on_event=None, quick_wait: float = 60,
             except Exception:  # noqa: BLE001
                 pass
 
+    if qq_transport.provider() != qq_transport.NAPCAT:
+        say("error", "当前不是NapCat接入；拒绝重启或登录NapCat")
+        return "unsupported_transport"
     if not napcat_dir():
         say("error", "没有配置 NAPCAT_DIR，无法重启 NapCat")
         return "no_napcat"
@@ -177,7 +196,7 @@ def relogin(qq: str, *, reason: str = "", on_event=None, quick_wait: float = 60,
         if time.time() < float(st.get("running_until") or 0):
             say("warn", "另一处正在重新登录，这次跳过")
             return "busy"
-        save_state(running_until=time.time() + quick_wait + qr_wait + 60)
+        save_state(running_until=time.time() + quick_wait + qr_wait + 60, pending_qq="", pending_at=0)
         say("info", f"正在用快速登录（免扫码）重启 NapCat，账号 {qq}" + (f"（{reason}）" if reason else ""))
         stop_napcat()
         start_napcat(qq)
@@ -219,17 +238,56 @@ def schedule_auto(qq: str, tag: str = "", message: str = "") -> bool:
     if time.time() - float(st.get("last_auto") or 0) < cooldown_minutes() * 60:
         log(f"[warn] 收到下线通知，但 {cooldown_minutes()} 分钟内已自动恢复过一次，这次不再自动重启，请扫码")
         return False
-    save_state(last_auto=time.time(), last_kick=time.time(), last_kick_reason=f"{tag} {message}".strip())
+    save_state(last_auto=time.time(), last_kick=time.time(), last_kick_reason=f"{tag} {message}".strip(),
+               pending_qq=str(qq), pending_at=time.time())
+    _start_auto(qq, delay_seconds())
+    return True
 
+
+def qr_waiting(minutes: float = QR_GRACE_MIN) -> bool:
+    """最近几分钟刚出过二维码（有人可能正在扫）：这时自动恢复不要重启 NapCat，免得把正在扫的二维码作废。"""
+    qr = qrcode_path()
+    try:
+        return bool(qr) and time.time() - os.path.getmtime(qr) < minutes * 60
+    except OSError:
+        return False
+
+
+def _start_auto(qq: str, wait: float) -> None:
     def run():
-        time.sleep(delay_seconds())
+        time.sleep(max(0.0, wait))
+        st = load_state()
+        if str(st.get("pending_qq") or "") != str(qq):
+            return  # 已经被别处处理过（另一次恢复 / 登录助手）
+        save_state(pending_qq="", pending_at=0)
         s = status(qq)
         if s not in ("offline", "down"):  # down：被踢后 NapCat 自己退出了，也要拉起来
-            log(f"[info] 等了 {delay_seconds()} 秒，当前状态 {s}，不需要自动恢复")
+            log(f"[info] 等了 {int(wait)} 秒，当前状态 {s}，不需要自动恢复")
+            return
+        if s == "down" and qr_waiting():
+            log("[info] NapCat 刚出过二维码、可能有人正在扫码，这次不自动重启")
             return
         relogin(qq, reason="掉线后自动恢复", notify_owner=True)
 
     threading.Thread(target=run, daemon=True, name="napcat-recover").start()
+
+
+def resume_pending(qq: str) -> bool:
+    """机器人重启后调用：掉线后安排的自动恢复还没来得及做（机器人进程被重启打断了），接着做。"""
+    if not enabled() or not napcat_dir():
+        return False
+    st = load_state()
+    if str(st.get("pending_qq") or "") != str(qq):
+        return False
+    at = float(st.get("pending_at") or 0)
+    if time.time() - at > 3600:
+        save_state(pending_qq="", pending_at=0)
+        return False
+    if recovering():
+        return False
+    left = at + delay_seconds() - time.time()
+    log(f"[info] 机器人重启前 QQ {qq} 掉线后的自动恢复还没做，接着做")
+    _start_auto(qq, max(10.0, left))
     return True
 
 

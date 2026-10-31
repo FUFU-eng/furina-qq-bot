@@ -31,7 +31,7 @@ UPSCALE_TILE = int(getattr(_config, "upscale_tile", 0))
 # 这类文本艾特也视为艾特机器人（真正的 [CQ:at] 仍是首选判定方式）
 BOT_ALIASES = getattr(_config, "bot_aliases", "芙宁娜,芙芙,水神大人").split(",")
 
-# 大群（主群）和小群（分群）群号：大群强化的图片自动转发到小群
+# 大群（圣芙蕾雅学园）和小群（圣芙蕾雅分园）群号：大群强化的图片自动转发到小群
 MAIN_GROUP_ID = str(getattr(_config, "main_group_id", ""))
 SUB_GROUP_ID = str(getattr(_config, "sub_group_id", ""))
 

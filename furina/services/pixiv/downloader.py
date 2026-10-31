@@ -6,6 +6,7 @@ the sender. Image failures do not trip API health.
 2026-10-20：原图下载/发送经常失败（国内到 i.pximg.net 很慢，十几 MB 的原图要 100 秒以上，
 QQ 上传也会超时）。现在：原图有独立时限；失败时由 provider 依次改用公共图片反代镜像、
 再退到 Pixiv 官方 1200px 高清版；超过 8MB 的图在保持分辨率的前提下转成高质量 JPEG 再发。
+2026-10-27：落盘后剥离 ICC_PROF/EXIF 并微调角落像素改变公开 MD5，提供防和谐重编码副本供群发兜底。
 """
 import asyncio
 import hashlib
@@ -14,7 +15,7 @@ from pathlib import Path
 import re
 import time
 import httpx
-from PIL import Image
+from PIL import Image, ImageOps
 from .errors import PixivError, PixivDownloadError, PixivAccessError
 try:
     from nonebot import logger
@@ -36,30 +37,69 @@ COMPACT_OVER=8*1024*1024     # 超过 8MB 的图 QQ 上传很容易超时
 COMPACT_MAX_SIDE=4096
 
 
+def _tweak_corner_pixel(im):
+    """Flip 1 LSB in the bottom-right pixel so MD5 differs from public Pixiv hash."""
+    w, h = im.size
+    if w <= 0 or h <= 0:
+        return
+    px = im.getpixel((w - 1, h - 1))
+    if isinstance(px, tuple) and len(px) >= 3:
+        r, g, b = px[0], px[1], px[2] ^ 1
+        im.putpixel((w - 1, h - 1), (r, g, b) + px[3:])
+    elif isinstance(px, int):
+        im.putpixel((w - 1, h - 1), px ^ 1)
+
+
 def _compact(path):
-    """保持分辨率（超长边才缩到 4096）转成高质量 JPEG；变小了才替换。返回最终大小。"""
+    """剥离 ICC_PROF/EXIF 并微调角落像素改变公开 MD5；超过 8MB 的图转成高质量 JPEG。返回最终大小。"""
     path=Path(path);size=path.stat().st_size
-    if size<=COMPACT_OVER:return size
     tmp=path.with_name(path.name+'.jpg.tmp')
     try:
         with Image.open(path) as im:
             if getattr(im,'is_animated',False):return size
+            fmt=(im.format or 'JPEG').upper()
             im=im.convert('RGB')
+            _tweak_corner_pixel(im)
+            if size<=COMPACT_OVER and fmt in ('JPEG','JPG','PNG','WEBP'):
+                im.save(tmp,format='JPEG',quality=95,optimize=True)
+                new=tmp.stat().st_size
+                if new<=COMPACT_OVER:
+                    tmp.replace(path)
+                    return new
             if max(im.size)>COMPACT_MAX_SIDE:
                 im.thumbnail((COMPACT_MAX_SIDE,COMPACT_MAX_SIDE),Image.LANCZOS)
             for q in (92,88,82):
                 im.save(tmp,format='JPEG',quality=q,optimize=True)
                 if tmp.stat().st_size<=COMPACT_OVER:break
         new=tmp.stat().st_size
-        if new<size:
-            tmp.replace(path);logger.info(f'[Pixiv下载] 大图已转高质量 JPEG {size}->{new} 字节')
+        if new<size or size<=COMPACT_OVER:
+            tmp.replace(path);logger.info(f'[Pixiv下载] 图片已净化重编码 {size}->{new} 字节')
             return new
         return size
     except Exception as exc:
-        logger.warning(f'[Pixiv下载] 大图压缩跳过：{type(exc).__name__}')
+        logger.warning(f'[Pixiv下载] 图片重编码跳过：{type(exc).__name__}')
         return size
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def make_antishield_copy(src_path, dst_path=None, mode='soft'):
+    """生成防 QQ 群聊屏蔽的临时图片副本（soft=微边框+四角微扰动重编码；rotate=逆时针旋转90度）。"""
+    src = Path(src_path)
+    dst = Path(dst_path) if dst_path else src.with_name(f"{src.stem}_{mode}.jpg")
+    with Image.open(src) as im:
+        im = im.convert('RGB')
+        if mode == 'rotate':
+            im = im.transpose(Image.Transpose.ROTATE_90)
+        else:
+            im = ImageOps.expand(im, border=2, fill=(252, 252, 250))
+        w, h = im.size
+        for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+            if 0 <= x < w and 0 <= y < h:
+                r, g, b = im.getpixel((x, y))
+                im.putpixel((x, y), (r ^ 1, g ^ 1, b ^ 1))
+        im.save(dst, format='JPEG', quality=90, optimize=True)
+    return dst
 
 
 def _validator(headers):
@@ -123,8 +163,6 @@ async def download_original(url,path,max_bytes,proxy,headers,budget=None,attempt
                                 length=response.headers.get('content-length','')
                                 expected=int(length) if length.isdigit() and int(length)>0 else None
                             if expected and expected>max_bytes:raise PixivError('原图超过本插件空间上限，不降质替换')
-                            # Enough time for a big original that is making progress, but
-                            # no attempt/combination may exceed the absolute 360s budget.
                             per_attempt=max(MIN_ATTEMPT_BUDGET,(expected or max_bytes)/131072+30)
                             budget.reschedule(asyncio.get_running_loop().time()+min(deadline-time.monotonic(),per_attempt))
                             received=offset;last_log=time.monotonic();stage='body'
@@ -146,11 +184,9 @@ async def download_original(url,path,max_bytes,proxy,headers,budget=None,attempt
             except (httpx.TransportError,TimeoutError) as exc:
                 last_error=type(exc).__name__
                 logger.warning(f'[Pixiv下载] retry asset={asset} attempt={attempt+1} stage={stage} bytes={received}/{expected or "?"} elapsed={time.monotonic()-t0:.1f}s error={last_error} loop_lag_max={max_loop_lag:.1f}s')
-                # Without a validator the next attempt truncates, never combines bodies.
                 if attempt<attempts-1 and time.monotonic()<deadline:
                     await asyncio.sleep(min(BACKOFF[attempt],max(0,deadline-time.monotonic())))
             except (OSError,ValueError) as exc:
-                # Filesystem/invalid image data is not fixed by hammering the CDN.
                 raise PixivError(f'原图保存或校验失败（{type(exc).__name__}），阶段 {stage}') from None
         raise PixivDownloadError(f'单张原图下载未完成（{last_error}，阶段{stage}，收到{received}/{expected or "未知"}字节，耗时{time.monotonic()-start:.0f}秒）；其他作品可继续')
     finally:

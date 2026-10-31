@@ -32,6 +32,9 @@ except ValueError:
     nonebot.load_plugin("furina.plugins.chat")
 
 
+_last_mtime = [0]
+
+
 def write_env(text: str) -> None:
     import time
 
@@ -44,4 +47,8 @@ def write_env(text: str) -> None:
         text = text + ("" if not text or text.endswith("\n") else "\n") + "AI_CHAT_LINGER=0\n"
     p.write_text(text, encoding="utf-8")
     st = p.stat()
-    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + int(time.time() * 1000) % 1000 + 1_000_000))
+    # env 按 (mtime, 大小) 判断要不要重读：同一毫秒里连写两次、大小又一样时会读到旧值（test_switch_off 偶发失败）。
+    # 保证每次写完的 mtime 都比上一次大。
+    mtime = max(st.st_mtime_ns + int(time.time() * 1000) % 1000 + 1_000_000, _last_mtime[0] + 1_000_000)
+    _last_mtime[0] = mtime
+    os.utime(p, ns=(st.st_atime_ns, mtime))

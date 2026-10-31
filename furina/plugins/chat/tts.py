@@ -84,9 +84,9 @@ def extract_marker(reply: str) -> tuple[str, bool]:
 
 
 # ---------------- 用哪种语气说（四段参考音频：平静 / 神气 / 日常 / 傲娇） ----------------
-_TSUN_RE = re.compile(r"哼|才不|才没|才、才|谁要|谁稀罕|别误会|勉强|笨蛋|不许|讨厌|随便你|原谅你|算你|哪有|我才|不是因为")
-_PROUD_RE = re.compile(r"本芙宁娜|芙宁娜大人|本大明星|本导演|我宣布|不愧是我|那是自然|那当然|当然了|观众|各位|舞台|主角|看我的|交给我|"
-                       r"哈哈哈|完美|一锤定音|精彩|厉害吧|谢幕")
+_TSUN_RE = re.compile(r"哼|啧|才不|才没|才、才|谁要|谁稀罕|别误会|勉强|笨蛋|不许|讨厌|随便你|原谅你|算你|哪有|我才|不是因为|皮痒|算盘珠子|做梦|想得美|小蛋糕|充钱|粮草|罢工")
+_PROUD_RE = re.compile(r"本芙|本水神|芙宁娜大人|本大明星|本导演|我宣布|不愧是我|那是自然|那当然|当然了|观众|各位|舞台|主角|看我的|交给我|"
+                       r"哈哈哈|完美|一锤定音|精彩|厉害吧|谢幕|小本本|跪下|叫声好听的")
 _CALM_RE = re.compile(r"别难过|没事的|抱抱|辛苦了|晚安|早点睡|慢慢来|我在|别哭|不要紧|好好休息|其实|说真的|认真的")
 
 
@@ -151,7 +151,14 @@ def decide(group_id, reply: str, current_text: str, marked: bool, *, engine_hot:
         return "explicit"
     if marked:
         return "marked" if engine_hot or r.random() < 0.5 else ""
-    if engine_hot and r.random() < max(0.0, config.VOICE_PROBABILITY):
+    prob = max(0.0, config.VOICE_PROBABILITY)
+    try:
+        from . import fun_features
+        if fun_features.voice_boost_enabled() and fun_features.VOICE_BOOST_RE.search(reply or ""):
+            prob = max(prob, fun_features.voice_boost_prob())
+    except Exception:  # noqa: BLE001
+        pass
+    if engine_hot and r.random() < prob:
         return "random"
     return ""
 
@@ -164,8 +171,14 @@ async def maybe_send(sender, group_id, reply: str, current_text: str, marked: bo
         hot = await voice_tts.is_online() if available(group_id) else False
         why = decide(group_id, reply, current_text, marked, engine_hot=hot)
         if not why:
-            if marked and not hot and available(group_id):
-                await voice_tts.warm_up()  # 这次来不及，先把引擎热起来
+            boost_hit = False
+            try:
+                from . import fun_features
+                boost_hit = fun_features.voice_boost_enabled() and bool(fun_features.VOICE_BOOST_RE.search(reply or ""))
+            except Exception:  # noqa: BLE001
+                pass
+            if (marked or boost_hit) and not hot and available(group_id):
+                await voice_tts.warm_up()  # 这次来不及，先把引擎热起来供下一句傲娇/抖S语音使用
             return False
         emo = emotion or (classify(reply) if voice_tts.settings()["emotions"] else None)
         wav = await voice_tts.synthesize(reply, wait=90.0 if why != "random" else 5.0, emotion=emo)

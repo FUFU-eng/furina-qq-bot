@@ -24,7 +24,7 @@ class RotateTest(unittest.TestCase):
 
     def test_defaults(self):
         ds = brain.dsh_settings()
-        self.assertEqual((ds["context_max_k"], ds["recap_lines"]), (60, 30))
+        self.assertEqual((ds["context_max_k"], ds["recap_lines"]), (30, 30))
         from panel.services import brain_settings
         fields = {f[0]: f for _t, _d, fs in brain_settings.BRAIN for f in fs}
         self.assertEqual(fields["AI_CHAT_DSH_CONTEXT_MAX_K"][3], ds["context_max_k"])

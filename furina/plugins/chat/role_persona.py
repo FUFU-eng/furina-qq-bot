@@ -73,7 +73,7 @@ def _active_qq():
 
 
 def _resolve_role(qq: str):
-    """返回当前 QQ 绑定的角色 dict；没绑定或找不到返回 None。"""
+    """返回当前 QQ 绑定的角色 dict；若未显式绑定但角色库里有 furina，优先取库里的 furina（方便面板热更新直接生效）。"""
     if not qq:
         qq = _active_qq()
     role_id = ""
@@ -81,10 +81,13 @@ def _resolve_role(qq: str):
         if str(p.get("qq")) == str(qq):
             role_id = p.get("role_id", "")
             break
-    if not role_id:
-        return None
-    for r in load_roles():
-        if str(r.get("id")) == str(role_id):
+    roles_list = load_roles()
+    if role_id:
+        for r in roles_list:
+            if str(r.get("id")) == str(role_id):
+                return r
+    for r in roles_list:
+        if str(r.get("id")) == "furina":
             return r
     return None
 

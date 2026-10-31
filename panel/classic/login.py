@@ -21,6 +21,8 @@ from PySide6.QtCore import QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPalette, QPixmap
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QVBoxLayout
 
+from furina.core import env, qq_transport
+from . import v2bridge as _v2
 from .settings import _ask, _button, _chip, _dark_title_bar, _label, build_style, set_prop
 
 DEFAULT_QRCODE_PATH = r"E:\NapCat\cache\qrcode.png"
@@ -162,12 +164,14 @@ def _set_role(button, role):
 class _Bridge(QObject):
     detected = Signal(object)
     probed = Signal(object)
+    confirmed = Signal(object)
 
 
 class LoginHelper(QDialog):
     def __init__(self, panel, qrcode_path=DEFAULT_QRCODE_PATH, webui_port=6099):
         super().__init__(panel)
         self.panel = panel
+        self.snow = qq_transport.uses_snowluma()
         self.qrcode_path = qrcode_path
         self.webui_port = webui_port
         self.qq, self.nick = _bot_account(panel)
@@ -187,7 +191,7 @@ class LoginHelper(QDialog):
         self._view = None
 
         self.setObjectName("loginHelper")
-        self.setWindowTitle("QQ 登录助手")
+        self.setWindowTitle("QQ 接入助手" if self.snow else "QQ 登录助手")
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         pal = self.palette()
         pal.setColor(QPalette.ColorRole.Window, QColor("#0f172a"))
@@ -200,6 +204,7 @@ class LoginHelper(QDialog):
         self._bridge = _Bridge(self)
         self._bridge.detected.connect(self._on_detected)
         self._bridge.probed.connect(self._on_probed)
+        self._bridge.confirmed.connect(self._on_confirmed)
         self._build()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._tick)
@@ -212,8 +217,8 @@ class LoginHelper(QDialog):
         root = QVBoxLayout(self)
         root.setContentsMargins(26, 22, 26, 20)
         root.setSpacing(14)
-        root.addWidget(_label("QQ 登录助手", "pageTitle"))
-        root.addWidget(_label("机器人 QQ 掉线或没登录时，按这里的步骤重新扫码。", "pageDesc", wrap=True))
+        root.addWidget(_label("QQ 接入助手", "pageTitle"))
+        root.addWidget(_label("SnowLuma 由你手动选择 QQ 客户端；账号确认前芙宁娜不会处理群消息。" if self.snow else "机器人 QQ 掉线或没登录时，按这里的步骤重新扫码。", "pageDesc", wrap=True))
 
         body = QHBoxLayout()
         body.setSpacing(16)
@@ -233,19 +238,24 @@ class LoginHelper(QDialog):
         status.layout().addWidget(self.status_note)
         account = QHBoxLayout()
         account.setSpacing(8)
-        account.addWidget(_label("机器人账号", "fieldLabel"))
-        account.addWidget(_label(self.nick or "（QQ 号管理里没有昵称）", "bigName"))
-        account.addWidget(_label(f"QQ {self.qq or '未设置'}", "pill"))
+        account.addWidget(_label("当前接入", "fieldLabel"))
+        account.addWidget(_label("SnowLuma" if self.snow else "NapCat", "bigName"))
+        account.addWidget(_label(("配置QQ " + self.qq if self.qq else "账号待确认") if self.snow else f"QQ {self.qq or '未设置'}", "pill"))
         account.addStretch(1)
         status.layout().addLayout(account)
         left.addWidget(status)
 
-        steps = self._card("扫码步骤")
-        for num, title, sub in (
+        steps = self._card("SnowLuma接入步骤" if self.snow else "扫码步骤")
+        instructions = (
+            ("1", "阅读并同意SnowLuma首次协议提示", "SnowLuma是第三方QQ接入工具，不代表官方认证通道。"),
+            ("2", "在本地管理页选择你要使用的QQ进程并点击Load", "自动挂钩保持关闭；不要选择/尝试已被封的账号。"),
+            ("3", "确认检测到的QQ号码确实是机器人号", "点下面的确认按钮后才会启用芙宁娜处理消息。"),
+        ) if self.snow else (
             ("1", f"手机 QQ 先切换到 {self.account_text}", "手机上登录的是哪个号，扫码登录进来的就是哪个号。"),
             ("2", "扫右边的二维码，或打开 WebUI 的「扫码登录」", "WebUI 先弹出「登录失败」时：点「确定」，再点「重新获取二维码」。"),
             ("3", "在手机上确认登录", "左下角变成「QQ 在线」就好了，这个窗口也会显示登录成功。"),
-        ):
+        )
+        for num, title, sub in instructions:
             steps.layout().addLayout(self._step(num, title, sub))
         left.addWidget(steps)
 
@@ -274,22 +284,34 @@ class LoginHelper(QDialog):
         body.addWidget(qr_card, 0, Qt.AlignTop)
         root.addLayout(body, 1)
 
-        root.addWidget(_label(
+        guidance = (
+            "SnowLuma是第三方QQ接入工具，不代表官方通道。首次使用请自行阅读并同意其协议；"
+            "只手动加载你选定的QQ进程，确认显示账号无误后再启用芙宁娜。"
+            if self.snow else
             "WebUI 提示「当前账号(xxx)已登录,无法重复登录」？xxx 不是机器人账号：扫码用错了号，这个号正登录在这台电脑的"
             "另一个 QQ 里；xxx 就是机器人账号：先确认自己的 QQ 里没有登录它，再点「重启 NapCat」重新扫码"
-            "（NapCat 掉线后可能残留旧会话）。", "help", wrap=True))
+            "（NapCat 掉线后可能残留旧会话）。"
+        )
+        root.addWidget(_label(guidance, "help", wrap=True))
 
         footer = QHBoxLayout()
         footer.setSpacing(8)
-        self.restart_btn = _button("重启 NapCat", "danger", self._on_restart,
-                                   "只重启机器人用的 NapCat（QQ）进程，不会关闭你自己开的 QQ，也不停 NoneBot；重启后重新扫码")
+        self.restart_btn = _button(
+            "打开 SnowLuma 管理页" if self.snow else "重启 NapCat", "danger", self._on_restart,
+            "只启动或打开 SnowLuma 本地管理页；不会自动登录、加载或结束任何 QQ 进程" if self.snow else
+            "只重启机器人用的 NapCat（QQ）进程，不会关闭你自己开的 QQ，也不停 NoneBot；重启后重新扫码"
+        )
         footer.addWidget(self.restart_btn)
         footer.addStretch(1)
         self.close_btn = _button("关闭", slot=self.close)
         footer.addWidget(self.close_btn)
+        self.confirm_btn = _button("确认此QQ并启用", "primary", self._on_confirm_snow, "只在你核对账号无误后确认；此前出站和群聊处理都被阻止")
+        self.confirm_btn.setVisible(False)
+        footer.addWidget(self.confirm_btn)
         self.start_btn = _button("启动机器人", "primary", self._on_start)
         footer.addWidget(self.start_btn)
-        self.webui_btn = _button("打开 WebUI", slot=self._on_webui, tip="在浏览器里打开 NapCat WebUI（扫码 / 密码登录）")
+        self.webui_btn = _button("打开本地管理页" if self.snow else "打开 WebUI", slot=self._on_webui,
+                                 tip="打开本机 SnowLuma WebUI；需要手动登录并选择 QQ" if self.snow else "在浏览器里打开 NapCat WebUI（扫码 / 密码登录）")
         footer.addWidget(self.webui_btn)
         root.addLayout(footer)
 
@@ -345,6 +367,17 @@ class LoginHelper(QDialog):
         return getattr(self._health(), "state", "unknown")
 
     def _state(self):
+        if self.snow:
+            health = self._health()
+            if not self._napcat_up:
+                return "snowluma_stopped"
+            if getattr(health, "state", "") == "online":
+                actual = str(getattr(health, "user_id", "") or "")
+                confirmed = env.get_bool("SNOWLUMA_ACCOUNT_CONFIRMED", False)
+                if not confirmed or actual != env.get("BOT_QQ", ""):
+                    return "snowluma_confirm"
+                return "online"
+            return "snowluma_waiting"
         if self._restart_requested and getattr(self.panel, "busy", False):
             return "restarting"
         state = self._health_state()
@@ -375,14 +408,14 @@ class LoginHelper(QDialog):
         self._render()
 
     def _probe_worker(self):
-        up = port_open(self.webui_port)
+        up = _v2.napcat_running()
         try:
             self._bridge.probed.emit(up)
         except RuntimeError:  # 窗口已关闭
             pass
 
     def _detect_worker(self):
-        clients = detect_other_qq()
+        clients = [] if self.snow else detect_other_qq()
         try:
             self._bridge.detected.emit(clients)
         except RuntimeError:
@@ -398,6 +431,36 @@ class LoginHelper(QDialog):
         self._others = clients or []
         self._render()
 
+    def _on_confirm_snow(self):
+        actual=str(getattr(self._health(), "user_id", "") or "")
+        if not actual.isdigit():
+            self.status_note.setText("尚未读到SnowLuma当前QQ账号")
+            self.status_note.setVisible(True)
+            return
+        if not _ask(self,"确认机器人QQ",f"SnowLuma当前加载的账号是 {actual}。确认这是你选定的机器人号吗？确认后才开放消息处理，并把BOT_QQ绑定到该账号。"):
+            return
+        self.confirm_btn.setEnabled(False)
+        def run():
+            try:
+                from panel.services.qq_transport import confirm_account
+                result=confirm_account(actual)
+                self._bridge.confirmed.emit({"ok":True,**result})
+            except Exception as exc:
+                self._bridge.confirmed.emit({"ok":False,"error":str(exc)[:180]})
+        threading.Thread(target=run,daemon=True).start()
+
+    def _on_confirmed(self,result):
+        self.confirm_btn.setEnabled(True)
+        if not result.get("ok"):
+            self.status_note.setText(result.get("error") or "账号确认失败")
+            self.status_note.setVisible(True)
+            return
+        logger=getattr(self.panel,"add_log",None)
+        if callable(logger):logger("success",f"[SnowLuma] 已确认QQ {result.get('uin')}，正在启动机器人")
+        starter=getattr(self.panel,"start_bot",None)
+        if callable(starter):starter()
+        self._last_probe=0.0
+
     def _render(self):
         state = self._state()
         health = self._health()
@@ -410,17 +473,26 @@ class LoginHelper(QDialog):
             self._was_online = False
 
         chip_text, tone, headline = {
-            "restarting": ("重启中", "info", "正在重启 NapCat，15–30 秒后这里会出现新的二维码…"),
-            "online": ("在线", "on", "✓ 机器人 QQ 在线，不需要登录"),
+            "snowluma_stopped": ("未运行", "off", "SnowLuma本地接入端尚未启动"),
+            "snowluma_waiting": ("等待加载QQ", "warn", "打开SnowLuma本地管理页，手动选择目标QQ并点Load；确认前芙宁娜保持锁定"),
+            "snowluma_confirm": ("待确认", "warn", f"检测到QQ {getattr(health, 'user_id', '') or '未知'}；核对为预定机器人号后再点确认启用"),
+            "restarting": ("启动中", "info", "正在启动本地QQ接入端…"),
+            "online": ("在线", "on", "✓ 机器人 QQ 在线，消息通道正常"),
             "no_napcat": ("未运行", "off", "NapCat 没有在运行：先点「启动机器人」"),
             "offline": ("已掉线", "warn", "QQ 登录已失效（NapCat 还在运行，但账号掉线了）"),
             "mismatch": ("账号不对", "warn", "NapCat 登录的不是机器人账号"),
             "waiting": ("等待扫码", "warn", "NapCat 正在等待登录：用机器人账号扫码即可"),
         }[state]
         note = ""
-        if state == "online" and self._login_succeeded:
+        if self.snow:
+            actual = str(getattr(health, "user_id", "") or "")
+            if state == "snowluma_confirm":
+                note = f"检测到 {actual}，请确认这就是你亲自选定的机器人账号。确认后才会启动芙宁娜。"
+            elif state == "snowluma_waiting":
+                note = "先阅读/同意SnowLuma条款，在本机管理页手动选中QQ进程并点击Load。不要选被封号。"
+        elif state == "online" and self._login_succeeded:
             headline = "✓ 登录成功，机器人已上线"
-        if state == "offline":
+        if not self.snow and state == "offline":
             note = "掉线后在同一个 NapCat 里直接重新扫码，可能会被提示「已登录,无法重复登录」，建议先点「重启 NapCat」。"
         elif state == "mismatch":
             actual = getattr(health, "user_id", "") or "其它账号"
@@ -446,6 +518,18 @@ class LoginHelper(QDialog):
             QTimer.singleShot(0, self, self._fit)
 
     def _render_qr(self, state):
+        if self.snow:
+            view = "snowluma:" + state
+            text = "在本机管理页加载QQ" if state in ("snowluma_waiting", "snowluma_confirm") else "本地管理页未运行"
+            if self._view != view:
+                self._view = view
+                self._qr_stamp = None
+                self.qr_label.clear()
+                self.qr_label.setObjectName("qrEmpty")
+                set_prop(self.qr_label, "tone", "off")
+                self.qr_label.setText(text)
+            self.qr_caption.setText(f"本机地址：{qq_transport.webui_url()}\n不会自动登录或注入其他QQ")
+            return
         age = qr_age(self.qrcode_path)
         fresh = age is not None and age < QR_MAX_AGE
         if state == "waiting" and fresh:
@@ -503,19 +587,21 @@ class LoginHelper(QDialog):
 
     def _render_buttons(self, state):
         busy = getattr(self.panel, "busy", False)
-        self.start_btn.setVisible(state == "no_napcat")
+        self.start_btn.setVisible(state in ("no_napcat", "snowluma_stopped"))
         self.start_btn.setEnabled(not busy)
-        self.restart_btn.setVisible(state in ("waiting", "offline", "mismatch", "restarting"))
+        self.confirm_btn.setVisible(self.snow and state == "snowluma_confirm")
+        self.confirm_btn.setEnabled(not busy)
+        self.restart_btn.setVisible(state in ("waiting", "offline", "mismatch", "restarting", "snowluma_waiting", "snowluma_confirm"))
         self.restart_btn.setEnabled(not busy)
-        want_restart_primary = state in ("offline", "mismatch")
-        label = "重启 NapCat 并扫码" if want_restart_primary else "重启 NapCat"
+        want_restart_primary = state in ("offline", "mismatch", "snowluma_waiting", "snowluma_confirm")
+        label = ("打开 SnowLuma 管理页" if self.snow else "重启 NapCat 并扫码") if want_restart_primary else ("检查接入端" if self.snow else "重启 NapCat")
         if self.restart_btn.text() != label:
             self.restart_btn.setText(label)
         restart_role = "primary" if want_restart_primary else "danger"
         if self.restart_btn.objectName() != restart_role:
             _set_role(self.restart_btn, restart_role)
-        self.webui_btn.setEnabled(state not in ("no_napcat", "restarting"))
-        webui_role = "primary" if state == "waiting" and self._view != "qr" else ""
+        self.webui_btn.setEnabled(state not in ("no_napcat", "snowluma_stopped", "restarting"))
+        webui_role = "primary" if state in ("waiting", "snowluma_waiting", "snowluma_confirm") and self._view != "qr" else ""
         if self.webui_btn.objectName() != webui_role:
             _set_role(self.webui_btn, webui_role)
 
@@ -532,6 +618,13 @@ class LoginHelper(QDialog):
         self._last_probe = 0.0
 
     def _on_restart(self):
+        if self.snow:
+            restart = getattr(self.panel, "restart_napcat_for_login", None)
+            if callable(restart):
+                restart()
+            self._on_webui()
+            self._last_probe = 0.0
+            return
         text = ("只重启机器人用的 NapCat（QQ）进程：\n"
                 "· 不会关闭你自己开的 QQ\n"
                 "· 不会停止 NoneBot（机器人服务）\n\n"

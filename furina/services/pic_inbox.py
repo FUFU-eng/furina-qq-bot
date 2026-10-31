@@ -28,7 +28,7 @@ NS_META = "pic_inbox_meta"
 NS_ENH_AUDIT = "pic_enhance_audit"
 ENH_AUDIT_KEEP_DAYS = 30
 
-DEFAULT_DIR = r"D:\FurinaPicInbox"
+DEFAULT_DIR = r"G:\FurinaPicInbox"
 DEFAULT_EXPORT = r"D:\Pictures\Eagle"
 UNDO_SECONDS = 300
 SEEN_KEEP_DAYS = 120

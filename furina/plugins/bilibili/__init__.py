@@ -102,7 +102,9 @@ async def _on_cmd(bot, event):
             await _cmd.send("我正在刷 B 站呢，等会儿再看消息～")
             return
         async with _busy:
-            await _cmd.send(await replies.run_replies(_notify_owner, manual=True))
+            r1 = await replies.run_replies(_notify_owner, manual=True)
+            r2 = await replies.check_owner_dm(_notify_owner)
+            await _cmd.send(f"{r1}；{r2}" if r2 else r1)
     elif action == "暂停":
         store.halt("主人手动暂停", 24 * 365)
         store.log_activity("主人让我先别刷了", "end")
@@ -235,6 +237,7 @@ async def _notify_owner(text: str) -> None:
 
 async def _share_to_groups(text: str, bvid: str) -> int:
     """分享到开了「B站刷到分享」的群；返回实际分享了几个群。
+    先发「QQ小程序 哔哩哔哩卡片」，再分气泡发她的 1~2 句短评（如「这个好诶」「@主人 …」）。
     每群每天最多 BILI_SHARE_DAILY_MAX 次（默认 2，0 = 不限），同一群两次分享至少隔 2 小时。"""
     groups = set(permissions.enabled_groups(SHARE_FEATURE))
     live = live_groups.cached()
@@ -247,10 +250,16 @@ async def _share_to_groups(text: str, bvid: str) -> int:
         return 0
     bind_bot(self_id=sid)
     from ..chat import humanize, memory  # 延迟导入：聊天插件里的上下文与限速
+    from ...services.bilibili import storyboard
+
+    info = await storyboard.resolve_video_card_info(bvid)
+    if not info.get("ok"):
+        info = {"ok": True, "bvid": bvid, "url": f"https://www.bilibili.com/video/{bvid}", "title": bvid, "desc": text}
 
     today = time.strftime("%Y-%m-%d")
     cap = env.get_int("BILI_SHARE_DAILY_MAX", 2)
     shared = store.get_meta("shared") or {}
+    owner_qq = env.owner_qq()
     n = 0
     for gid in sorted(groups):
         rec = shared.get(gid)
@@ -260,15 +269,23 @@ async def _share_to_groups(text: str, bvid: str) -> int:
         hist = memory.get_history(int(gid))
         if not hist or time.time() - float(hist[-1].get("ts") or 0) > 6 * 3600:
             continue  # 群里大半天没人说话就不去自言自语
-        msg = f"{text}\nhttps://www.bilibili.com/video/{bvid}"
         sender = humanize.guarded(lambda m, g=int(gid): bot.send_group_msg(group_id=g, message=m), int(gid))
-        if await sender(Message(msg)) is None:
+        res = await storyboard.send_bili_card_and_bubbles(
+            bot,
+            sender,
+            info,
+            comments=text,
+            owner_qq=owner_qq,
+            pause_fn=lambda b: humanize.pause(humanize.burst_gap(b)),
+        )
+        if not res.get("ok"):
             continue
-        memory.add_message(int(gid), "assistant", f"{text}（分享了一个B站视频）")
+        title_str = info.get("title") or bvid
+        memory.add_message(int(gid), "assistant", f"[卡片] 哔哩哔哩（{title_str}） {bvid}\n{text}".strip())
         shared[gid] = {"day": today, "n": rec["n"] + 1, "last": time.time()}
         n += 1
         daily_limits.track(SHARE_FEATURE, int(gid))
-        logger.info(f"[B站] 分享到群{gid}：{text} {bvid}")
+        logger.info(f"[B站] 分享小程序卡片到群{gid}（card={res.get('card')}）：{text} {bvid}")
     store.set_meta("shared", shared)
     return n
 
@@ -297,7 +314,16 @@ async def _tick() -> None:
 
 
 async def _reply_tick() -> None:
-    """每分钟看一下是不是该看消息了（真正的间隔由 BILI_REPLY_CHECK_MINUTES 加随机抖动决定）。"""
+    """每分钟看一下是不是该看消息了（评论区按 BILI_REPLY_CHECK_MINUTES 查；主人 B 站私信每 3 分钟零 token 轻查一次）。"""
+    if _busy.locked():
+        return
+    now = time.time()
+    if now >= float(store.get_meta("dm_next") or 0):
+        store.set_meta("dm_next", now + 180)
+        async with _busy:
+            dm_res = await replies.check_owner_dm(_notify_owner)
+        if dm_res:
+            logger.info(f"[B站私信] {dm_res}")
     if _busy.locked():
         return
     ok, _why = replies.should_check()
@@ -374,7 +400,9 @@ async def _run_manual(action: str, keyword: str) -> None:
             if action == "surf":
                 result = await surf.run_round(_notify_owner, _share_to_groups, manual=True, keyword=keyword)
             elif action == "replies":
-                result = await replies.run_replies(_notify_owner, manual=True)
+                r1 = await replies.run_replies(_notify_owner, manual=True)
+                r2 = await replies.check_owner_dm(_notify_owner)
+                result = f"{r1}；{r2}" if r2 else r1
             else:
                 result = await surf.post_dynamic(_life(), _notify_owner, manual=True)
     except Exception as e:  # noqa: BLE001

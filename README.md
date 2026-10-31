@@ -15,7 +15,7 @@
 
 代码是给我们群写的，很多默认值和说法都带着我们群的习惯，开源出来主要是给想做类似东西的人参考。直接拿去用也行，但大概率要按你自己的群改一改，尤其是人设。
 
-基于 [NoneBot2](https://github.com/nonebot/nonebot2) + OneBot v11，QQ 端我用的是 [NapCat](https://github.com/NapNeko/NapCatQQ)。
+基于 [NoneBot2](https://github.com/nonebot/nonebot2) + OneBot v11。QQ 端可以用 [NapCat](https://github.com/NapNeko/NapCatQQ)，也可以用 SnowLuma，`.env` 里 `QQ_TRANSPORT` 选一个就行（见下面「QQ 端」）。
 
 ## 她能干什么
 
@@ -49,6 +49,13 @@
 - 新人进群会艾特欢迎一句，可以有点调皮
 - 发言有限流：每分钟、每小时都有上限（按群算），面板里一键开关；每人每天艾特次数用完时，她会用自己的口吻说一句再停，不会突然不理人
 - 省钱：可以接一个本机的免费模型服务（OpenAI 兼容接口）当第一线路，失败了自动换回付费模型（`AI_CHAT_FREE_*`）
+- 知道自己花了多少钱：最近 24 小时花得越多，她越懒得「没人叫也开口」，被艾特、被叫名字照样回。可以设每天上限和每个群每天上限（`AI_CHAT_DAILY_CAP_YUAN` / `AI_CHAT_GROUP_DAILY_CAP_YUAN`），超了就只回叫到她的。二代仿真每一轮花了多少，面板「模型花费」里按群按天都能看到
+- 说话算话：她随口答应的「等下发你」「明天帮你看看」会记下来，到点自己想起来去兑现；群友让她「半小时后叫我」「明天提醒小明交作业」，她也会真记下来，到点艾特人提醒（`AI_CHAT_COMMITMENTS`，默认开）
+- 引用不再失忆：群友引用一条很早的消息，或者机器人重启、QQ 重登之前的消息，她也知道引的是哪句话（每个群自己存了一份最近的消息原文）
+- 查梗：「X 是什么梗」先翻自己的梗本子，再查萌娘百科，最后才上网搜，查到的会记住
+- 认真做文件：让她「写一份 / 整理一份 / 做个清单」，她会开深度思考写好，当群文件发出来（功能权限里的「认真做文件」）
+- 合并转发里的图她也能看到，嵌套的合并转发会一层层展开
+- 一些整活功能：群友起哄时查岗主人的电脑桌面（会跳过密码类窗口，面板里能关）、真没余额了自动截充值页喊你充钱、给群友记「小本本」起外号翻黑历史
 
 人设在 `furina/plugins/chat/persona.py`，很长，可以整个换掉。
 
@@ -66,6 +73,8 @@
 - `/jm 车号` 下载后合成 PDF 发群文件
 - 定时提醒、每周封神榜（群聊发言排行）、群主发图转发到别的群
 - B 站：给她一个小号，她会自己刷视频、点赞、发弹幕、回评论区、发动态、关注喜欢的 UP 主。在群里说「去刷 B 站了」就真的离开十分钟，回来还会跟你聊看到了什么。碰到风控会立刻停
+- 看 B 站视频：群友甩来一个视频，她会读字幕、弹幕、热评，再用 B 站自带的预览图拼一张带编号和时间码的 3×3 分镜九宫格「看」画面（不下载视频），然后再吐槽
+- B 站画师图片：在面板或群里登记几个 UP 主（全群共用一份名单），每 20 分钟看一次有没有发新图，有就推到开了这个权限的群。只读 B 站，不会替你关注或发动态（`BILI_PICS_*`）
 - B 站直播：她可以当主播，见下面
 - 群友活跃统计：谁用得多一目了然
 
@@ -91,9 +100,11 @@
 
 双击 `打开控制面板.bat`。
 
-所有功能都能在面板里开关，按群、按人单独设置，改完马上生效，不用重启机器人。还能看她最近的心情、聊天记录、B 站刷了什么、每天调了多少次模型。
+所有功能都能在面板里开关，按群、按人单独设置，改完马上生效，不用重启机器人。还能看她最近的心情、聊天记录、B 站刷了什么、每天调了多少次模型、花了多少钱。
 
-桌面版用的是 PySide6，没装的话用 `打开控制面板(浏览器模式).bat`，会在浏览器里打开网页版。
+桌面版用的是 PySide6，最近整个重新排过版：壁纸只放在主页，其它页面都是实色底，字清楚多了；每页顶上有标题，长页面整页滚动，不再在卡片里塞小滚动框。设置窗口按「账号与模型 / 聊天 / 功能 / 系统」分组，设置项多的页面可以折叠，右上角一键全部展开，左上角能直接搜任何一项设置。
+
+没装 PySide6 的话用 `打开控制面板(浏览器模式).bat`，会在浏览器里打开网页版。
 
 ## 跑起来
 
@@ -101,7 +112,7 @@
 
 - Windows（我只在 Windows 上跑过，路径、浏览器之类的地方默认都按 Windows 写的）
 - Python 3.11 以上
-- 一个 OneBot v11 实现，推荐 NapCat
+- 一个 OneBot v11 实现：NapCat 或 SnowLuma
 - 一个 OpenAI 兼容的模型接口，我用的是 DeepSeek
 - （想用二代仿真的话）能装 Python 包的网络，见下面
 
@@ -123,13 +134,27 @@ copy .env.example .env
 | `AI_CHAT_LLM_API_KEY` | 模型接口的 key |
 | `AI_CHAT_LLM_BASE_URL` / `AI_CHAT_LLM_MODEL` | 接口地址和模型名 |
 
-然后在 NapCat 里加一个反向 WebSocket，地址填 `ws://127.0.0.1:8080/onebot/v11/ws`（端口跟 `.env` 里的 `PORT` 一致），再启动：
+然后接上 QQ 端（见下面「QQ 端」），再启动：
 
 ```bash
 python bot.py
 ```
 
 群里艾特她说句话，有回应就是通了。
+
+### QQ 端
+
+`.env` 里的 `QQ_TRANSPORT` 决定用哪个，默认 `napcat`。
+
+**NapCat**：在 NapCat 里加一个反向 WebSocket，地址填 `ws://127.0.0.1:8080/onebot/v11/ws`（端口跟 `.env` 里的 `PORT` 一致）。
+
+**SnowLuma**：
+
+1. `.env` 里设 `QQ_TRANSPORT=snowluma`，`SNOWLUMA_DIR` 指向 SnowLuma 的目录，再填两个至少 32 位的随机令牌：`SNOWLUMA_HTTP_TOKEN` 和 `ONEBOT_V11_ACCESS_TOKEN`
+2. 面板里启动 SnowLuma，它会按 `.env` 写好 SnowLuma 的 OneBot 配置（HTTP 接口默认 `127.0.0.1:13000`，反向 WS 连机器人）
+3. 在 SnowLuma 自己的本地管理页里登录 QQ，然后回面板确认是哪个号
+
+确认之前机器人什么都不收、什么都不发（`SNOWLUMA_ACCOUNT_CONFIRMED`），防止接错号。SnowLuma 的历史消息默认只用本地记录，想让它去服务器补拉就开 `SNOWLUMA_HISTORY_SYNC`。
 
 剩下的设置不用去翻 `.env`，打开面板慢慢调就行。
 
@@ -161,8 +186,8 @@ DSH 只在用到时才在后台启动，空闲一段时间自己退出；只监�
 bot.py              启动入口
 furina/
   core/             配置读取、数据库、权限、模型调用这些公共的东西
-  plugins/          每个功能一个插件，chat 是聊天，bililive 是直播
-  services/         语音、搜索、B 站客户端、图片筛选等
+  plugins/          每个功能一个插件，chat 是聊天，bililive 是直播，bili_pics 是 B 站画师图片
+  services/         语音、搜索、B 站客户端、图片筛选、查梗、做文件等
 panel/              控制面板（PySide6 桌面版 + 网页版）
 tests/              测试
 tools/              dsh_worker.py 和 dsh_bridge/ 是二代仿真的内核进程和工具桥；其余是从旧版迁移数据用的脚本，一般用不到
@@ -177,7 +202,7 @@ extras/             gsuid_core 插件
 python -m unittest discover -s tests -t .
 ```
 
-测试不联网、不调模型，也不会碰真实数据，现在一共 632 个。
+测试不联网、不调模型，也不会碰真实数据，现在一共 812 个。
 
 ## 一些说明
 
@@ -193,7 +218,7 @@ python -m unittest discover -s tests -t .
 
 ## 感谢
 
-- [NoneBot2](https://github.com/nonebot/nonebot2)、[NapCat](https://github.com/NapNeko/NapCatQQ)
+- [NoneBot2](https://github.com/nonebot/nonebot2)、[NapCat](https://github.com/NapNeko/NapCatQQ)、SnowLuma
 - [gsuid_core](https://github.com/Genshin-bots/gsuid_core)、[GenshinUID](https://github.com/KimigaiiWuyi/GenshinUID)
 - [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN)、[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)
 - [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python)

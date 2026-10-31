@@ -1,4 +1,4 @@
-"""群主发图自动转发插件：主群（源群）里群主发「1」开启后，他发的任何图片原样转发到分群（目标群）。
+"""群主发图自动转发插件：圣芙蕾雅学园（源群）里群主发「1」开启后，他发的任何图片原样转发到圣芙蕾雅分园（目标群）。
 
 触发条件：
 - 事件来自源群（RELAY_SOURCE_GROUP）
@@ -164,34 +164,30 @@ auto_relay_matcher = on_message(rule=Rule(_is_auto_user_event), priority=21, blo
 
 
 async def _fetch_image_bytes(bot, file_id: str, url: str) -> bytes | None:
-    """取图片原始字节：优先 NapCat 本地缓存，失败再 httpx 下载。"""
-    if file_id:
+    """取图片原始字节：优先协议端本地缓存（NapCat），再 httpx 下载刷新过的地址（SnowLuma）/消息原地址。"""
+    from ...core import images
+
+    local_path, fresh = await images.lookup_image(bot, file_id)
+    if local_path:
         try:
-            info = await bot.get_image(file=file_id)
-            if isinstance(info, dict):
-                local_path = info.get("file", "") or ""
-            else:
-                local_path = getattr(info, "file", "") or ""
-            if local_path and os.path.exists(local_path):
-                with open(local_path, "rb") as f:
-                    data = f.read()
-                if data:
-                    return data
-        except Exception as e:
+            with open(local_path, "rb") as f:
+                data = f.read()
+            if data:
+                return data
+        except OSError as e:
             logger.debug(f"[转发] 本地缓存获取失败: {e}")
-    if not url:
-        return None
-    try:
-        async with httpx.AsyncClient(
-            timeout=20,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"},
-        ) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200 and resp.content and len(resp.content) > 100:
-                return resp.content
-    except Exception as e:
-        logger.debug(f"[转发] 图片下载失败: {e}")
+    for u in images.download_candidates(fresh, url):
+        try:
+            async with httpx.AsyncClient(
+                timeout=20,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"},
+            ) as client:
+                resp = await client.get(u)
+                if resp.status_code == 200 and resp.content and len(resp.content) > 100:
+                    return resp.content
+        except Exception as e:
+            logger.debug(f"[转发] 图片下载失败: {e}")
     return None
 
 

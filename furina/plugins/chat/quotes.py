@@ -158,18 +158,77 @@ async def _parse_reply_message(reply_message, bot=None) -> QuoteInfo:
         elif stype == "at":
             texts.append(at_label(sdata.get("qq")) or "[@某人]")
 
-    texts.extend(await _expand_forwards(inline_nodes, forward_ids, bot))
+    forward_image_segments = []
+    image_limit = max(0, config.VISION_MAX_IMAGES - len(image_segments))
+    texts.extend(await _expand_forwards(
+        inline_nodes, forward_ids, bot,
+        image_segments=forward_image_segments, image_limit=image_limit,
+    ))
+    for image_segment in forward_image_segments:
+        if image_segment not in image_segments:
+            image_segments.append(image_segment)
+            images += 1
 
     full = "\n".join(t for t in texts if t)
     return QuoteInfo(images=images, text=full[: config.QUOTE_MAX_CHARS], failed=False, image_segments=image_segments,
                      forward=is_forward or bool(forward_ids))
 
 
-async def _expand_forwards(inline_nodes: list, forward_ids: list, bot=None) -> list[str]:
-    """合并转发 → 「[合并转发内容]\n谁: 说了什么」；新版 NapCat 直接带节点，旧版要按 id 去取。"""
+def _append_forward_images(nodes, image_segments: list, max_images: int) -> None:
+    """从合并转发节点收集可交给视觉模型的图片引用；限制节点数、图片数和 inline 嵌套深度。"""
+    max_images = max(0, int(max_images))
+    if max_images <= len(image_segments) or not isinstance(nodes, (list, tuple)):
+        return
+    seen = set(image_segments)
+
+    def _walk(current_nodes, depth: int = 0) -> None:
+        if len(image_segments) >= max_images or depth > 2:
+            return
+        for node in current_nodes[:config.FORWARD_MAX_NODES]:
+            if not isinstance(node, dict):
+                continue
+            payload = node.get("data") if node.get("type") == "node" else node
+            payload = payload if isinstance(payload, dict) else node
+            message = payload.get("message") or payload.get("content") or []
+            if isinstance(message, dict):
+                message = [message]
+            for stype, sdata in _iter_segments(message):
+                if stype == "image":
+                    ref = (str(sdata.get("file") or ""), str(sdata.get("url") or ""))
+                    if (ref[0] or ref[1]) and ref not in seen:
+                        image_segments.append(ref)
+                        seen.add(ref)
+                elif stype in ("forward", "longmsg") and depth < 2:
+                    inline = sdata.get("content")
+                    if isinstance(inline, list) and inline:
+                        _walk(inline, depth + 1)
+                if len(image_segments) >= max_images:
+                    return
+
+    _walk(nodes)
+
+
+async def _inline_nested(bot, nodes) -> None:
+    """SnowLuma 的内层合并转发只给 id：补成内联 content，后面的文字/看图展开才看得到里面。"""
+    try:
+        from ...core import forwards
+
+        await forwards.inline_nested(bot, nodes)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[AI聊天] 补全内层合并转发失败: {e}")
+
+
+async def _expand_forwards(inline_nodes: list, forward_ids: list, bot=None,
+                           image_segments: list | None = None, image_limit: int | None = None) -> list[str]:
+    """合并转发 → 「[合并转发内容]\n谁: 说了什么」；文字与图片都只按节点/视觉上限展开。"""
     texts = []
+    max_images = config.VISION_MAX_IMAGES if image_limit is None else image_limit
     if inline_nodes:
-        lines = _forward_lines(inline_nodes[: config.FORWARD_MAX_NODES])
+        nodes = inline_nodes[: config.FORWARD_MAX_NODES]
+        await _inline_nested(bot, nodes)
+        if image_segments is not None:
+            _append_forward_images(nodes, image_segments, max_images)
+        lines = _forward_lines(nodes)
         texts.append("[合并转发内容]\n" + "\n".join(lines) if lines else "[合并转发]")
     for fid in forward_ids[:3]:
         try:
@@ -177,7 +236,12 @@ async def _expand_forwards(inline_nodes: list, forward_ids: list, bot=None) -> l
             # NapCat 的转发 id 不一定是纯数字；适配器返回的已经是 data 本身（旧代码多取了一层 data，永远是空的）
             fwd = await bot.get_forward_msg(id=int(fid) if fid.isdigit() else fid)
             fwd = fwd or {}
-            node_msgs = (fwd.get("messages") or (fwd.get("data") or {}).get("messages") or [])[: config.FORWARD_MAX_NODES]
+            data = fwd.get("data") if isinstance(fwd, dict) else {}
+            data = data if isinstance(data, dict) else {}
+            node_msgs = (fwd.get("messages") or data.get("messages") or [])[: config.FORWARD_MAX_NODES]
+            await _inline_nested(bot, node_msgs)
+            if image_segments is not None:
+                _append_forward_images(node_msgs, image_segments, max_images)
             lines = _forward_lines(node_msgs)
             texts.append("[合并转发内容]\n" + "\n".join(lines) if lines else "[合并转发]")
         except Exception as e:
@@ -186,8 +250,8 @@ async def _expand_forwards(inline_nodes: list, forward_ids: list, bot=None) -> l
     return texts
 
 
-async def forward_text(message, bot=None) -> str:
-    """群友直接发的合并转发（不是引用）：展开成几行「谁: 说了什么」；消息里没有转发就返回空串。"""
+async def forward_text(message, bot=None, image_segments: list | None = None) -> str:
+    """展开直接发送的合并转发；可选同时返回其中的图片引用，供本轮视觉输入使用。"""
     inline_nodes: list = []
     forward_ids: list = []
     for stype, sdata in _iter_segments(message):
@@ -200,7 +264,8 @@ async def forward_text(message, bot=None) -> str:
             forward_ids.append(str(sdata.get("id")))
     if not inline_nodes and not forward_ids:
         return ""
-    return "\n".join(await _expand_forwards(inline_nodes, forward_ids, bot))[: config.QUOTE_MAX_CHARS]
+    expanded = await _expand_forwards(inline_nodes, forward_ids, bot, image_segments=image_segments)
+    return "\n".join(expanded)[: config.QUOTE_MAX_CHARS]
 
 
 def _forward_lines(nodes) -> list[str]:
@@ -236,9 +301,11 @@ def _multimsg_text(sdata):
 
 
 def _card_text(sdata) -> str:
-    """QQ 小程序 / 分享卡片 → 「[卡片] 标题（简介）」，让她知道群友分享的是什么（B 站视频、文章、音乐……）。"""
+    """QQ 小程序 / 分享卡片 → 「[卡片] 标题（简介）」，若含 B 站 BV 号或 b23.tv 短链也一并保留，方便直接看视频。"""
     import json as _json
+    import re as _re
     raw = sdata.get("data") if isinstance(sdata, dict) else None
+    raw_str = raw if isinstance(raw, str) else _json.dumps(sdata or {}, ensure_ascii=False)
     title = desc = ""
     try:
         card = _json.loads(raw) if isinstance(raw, str) else (raw or {})
@@ -257,9 +324,20 @@ def _card_text(sdata) -> str:
         title = str(sdata.get("title") or "").strip()
         desc = desc or str(sdata.get("content") or "").strip()
     title, desc = title[:40], desc[:60]
+    bili_ref = ""
+    raw_unesc = raw_str.replace("\\/", "/")
+    bm = _re.search(r"(BV[0-9A-Za-z]{10})", raw_unesc)
+    if bm:
+        bili_ref = f" {bm.group(1)}"
+    else:
+        um = _re.search(r"https?://(?:b23\.tv|bili2233\.cn|(?:www\.|m\.)?bilibili\.com/video)/[0-9A-Za-z_\-]+", raw_unesc)
+        if um:
+            bili_ref = f" {um.group(0)}"
     if desc and desc != title:
-        return f"[卡片] {title}（{desc}）" if title else f"[卡片] {desc}"
-    return f"[卡片] {title}" if title else "[卡片]"
+        base = f"[卡片] {title}（{desc}）" if title else f"[卡片] {desc}"
+    else:
+        base = f"[卡片] {title}" if title else "[卡片]"
+    return base + bili_ref
 
 
 def at_label(qq) -> str:

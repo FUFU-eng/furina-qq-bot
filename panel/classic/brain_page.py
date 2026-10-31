@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
@@ -99,6 +100,15 @@ class BrainPage(EnvPage):
         self.st_run.setText(txt)
         set_prop(self.st_run, "tone", tone)
         bits = [f"运行时目录 {st.get('runtime_dir')}", f"端口 {st.get('port')}", f"SDK {st.get('sdk')}"]
+        if st.get("route") == "custom":
+            bits.append(f"模型：外接 {st.get('custom_model')}")
+        elif st.get("custom_down_until"):
+            until = time.strftime("%H:%M", time.localtime(st["custom_down_until"]))
+            bits.append(f"模型：DeepSeek（外接模型暂停到 {until}：{str(st.get('custom_down_reason') or '')[:60]}）")
+        else:
+            bits.append(f"模型：{st.get('model') or 'DeepSeek'}")
+        if st.get("custom_fail_today"):
+            bits.append(f"外接今天出错 {st['custom_fail_today']} 次")
         if st.get("agent_enabled"):
             bits.append("Agent 已允许")
         if st.get("error"):

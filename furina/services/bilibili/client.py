@@ -15,6 +15,7 @@ import random
 import re
 import time
 import urllib.parse
+import uuid
 
 import httpx
 
@@ -386,6 +387,19 @@ class Client:
             return {}
         return {"mid": str(card.get("mid") or mid), "name": str(card["name"]), "following": bool(d.get("following"))}
 
+    async def user_dynamics(self, mid: str | int, offset: str = "") -> dict:
+        """只读某个UP的公开动态页；不是视频推荐，也不涉及关注/发动态。"""
+        uid = str(mid)
+        if not re.fullmatch(r"[1-9]\d{0,19}", uid) or len(str(offset)) > 200:
+            raise ValueError("UP UID或动态游标不正确")
+        data = await self._get(API + "/x/polymer/web-dynamic/v1/feed/space", {
+            "host_mid": uid, "offset": str(offset), "timezone_offset": -480, "platform": "web",
+            "features": "itemOpusStyle,listOnlyfans,opusBigCover"})
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise BiliError(-1, "动态页数据不完整")
+        return {"items": data["items"], "offset": str(data.get("offset") or ""),
+                "has_more": data.get("has_more") in (True, 1)}
+
     async def follow(self, mid: str | int) -> None:
         """关注一个人（act=1）。"""
         await self._post(API + "/x/relation/modify", {"fid": int(mid), "act": 1, "re_src": 11, "csrf": self.csrf})
@@ -407,3 +421,141 @@ class Client:
             d = await self._post("https://api.vc.bilibili.com/dynamic_svr/v1/dynamic_svr/create", {
                 "dynamic_id": 0, "type": 4, "rid": 0, "content": text, "csrf_token": self.csrf, "csrf": self.csrf})
             return str(d.get("dynamic_id_str") or d.get("dynamic_id") or "")
+
+    # ---------- 故事板快照（不下载视频，直接取 B 站自带雪碧图） ----------
+    async def videoshot(self, bvid: str, cid: int = 0) -> dict:
+        params: dict = {"bvid": bvid, "index": 1}
+        if cid:
+            params["cid"] = int(cid)
+        d = await self._get(API + "/x/player/videoshot", params)
+        return d if isinstance(d, dict) else {}
+
+    async def resolve_bvid(self, raw: str) -> str:
+        """从文本 / 链接 / b23.tv 短链里提取 BV 号。"""
+        s = str(raw or "").strip()
+        m = re.search(r"(BV[0-9A-Za-z]{10})", s)
+        if m:
+            return m.group(1)
+        sm = re.search(r"https?://(?:b23\.tv|bili2233\.cn)/[0-9A-Za-z_\-]+", s)
+        if sm:
+            try:
+                async with httpx.AsyncClient(headers={"User-Agent": UA}, follow_redirects=False, timeout=10.0) as hc:
+                    resp = await hc.get(sm.group(0))
+                    loc = resp.headers.get("location") or str(resp.url)
+                m2 = re.search(r"(BV[0-9A-Za-z]{10})", loc)
+                if m2:
+                    return m2.group(1)
+                am = re.search(r"/av(\d+)", loc)
+                if am:
+                    info = await self._get(API + "/x/web-interface/view", {"aid": int(am.group(1))})
+                    return str((info or {}).get("bvid") or "")
+            except Exception:
+                pass
+        return ""
+
+    # ---------- 私信（只读零 token 轮询 + 带回执校验发私信） ----------
+    async def dm_sessions(self) -> list[dict]:
+        d = await self._get(
+            "https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions",
+            {"session_type": 1, "group_id": 0, "Build": 0, "mobi_app": "web"},
+        )
+        out = []
+        for s in (d or {}).get("session_list") or []:
+            uid = int(s.get("talker_id") or 0)
+            if uid <= 0:
+                continue
+            preview = ""
+            try:
+                c = json.loads((s.get("last_msg") or {}).get("content") or "{}")
+                if isinstance(c, dict):
+                    preview = str(c.get("content") or c.get("text") or c.get("title") or "")[:80]
+            except Exception:
+                pass
+            out.append({
+                "uid": uid,
+                "unread": int(s.get("unread_count") or 0),
+                "last_ts": int((s.get("last_msg") or {}).get("timestamp") or 0),
+                "preview": preview,
+            })
+        return out
+
+    async def dm_messages(self, talker_id: int | str, size: int = 10) -> list[dict]:
+        """读某个会话最近 n 条私信（含 msg_type=7/8 视频分享卡片识别）。"""
+        my_mid = str((store.get_auth() or {}).get("mid") or self.cookies.get("DedeUserID") or "")
+        d = await self._get(
+            "https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs",
+            {"talker_id": int(talker_id), "session_type": 1, "size": max(1, min(30, int(size))),
+             "build": 0, "mobi_app": "web"},
+        )
+        msgs = list((d or {}).get("messages") or [])
+        msgs.reverse()
+        out = []
+        for m in msgs:
+            mt = int(m.get("msg_type") or 1)
+            text, bvid = "", ""
+            try:
+                c = json.loads(m.get("content") or "{}")
+                if mt in (7, 8) and isinstance(c, dict) and (c.get("jump_url") or c.get("bvid") or c.get("title") or c.get("author")):
+                    bvid = str(c.get("bvid") or "")
+                    if not bvid:
+                        bm = re.search(r"(BV[0-9A-Za-z]{10})", str(c.get("jump_url") or ""))
+                        bvid = bm.group(1) if bm else ""
+                    title = str(c.get("title") or c.get("headline") or c.get("desc") or "").strip()[:80]
+                    who = str(c.get("author") or "").strip()[:30]
+                    text = "[分享视频] " + (title or "(无标题)") + (f" / {who}" if who else "") + (f" {bvid}" if bvid else "")
+                elif isinstance(c, dict):
+                    text = str(c.get("content") or c.get("text") or "").strip()
+                else:
+                    text = str(c or "").strip()
+            except Exception:
+                text = str(m.get("content") or "").strip()
+            if not bvid and text:
+                bm = re.search(r"(BV[0-9A-Za-z]{10})", text)
+                if bm:
+                    bvid = bm.group(1)
+            if not text:
+                continue
+            key = str(m.get("msg_key") or m.get("msg_seqno") or m.get("timestamp") or "")
+            out.append({
+                "key": key,
+                "ts": int(m.get("timestamp") or 0),
+                "from_me": bool(my_mid and str(m.get("sender_uid") or "") == my_mid),
+                "kind": mt,
+                "text": text[:500],
+                "bvid": bvid,
+            })
+        return out
+
+    async def send_dm(self, receiver_uid: int | str, text: str) -> str:
+        """给指定 UID 发私信，校验 msg_key 投递回执。"""
+        msg_text = str(text or "").strip()
+        if not msg_text:
+            raise BiliError(-1, "私信内容不能为空")
+        sender_uid = str((store.get_auth() or {}).get("mid") or self.cookies.get("DedeUserID") or "").strip()
+        if not sender_uid:
+            me = await self.nav()
+            sender_uid = str(me.get("mid") or "")
+        dev_id = str(uuid.uuid4()).upper()
+        img, sub = await self.wbi_keys()
+        qparams = wbi_sign({"w_sender_uid": sender_uid, "w_receiver_id": str(receiver_uid), "w_dev_id": dev_id}, img, sub)
+        form = {
+            "msg[sender_uid]": sender_uid,
+            "msg[receiver_id]": str(receiver_uid),
+            "msg[receiver_type]": "1",
+            "msg[msg_type]": "1",
+            "msg[msg_status]": "0",
+            "msg[content]": json.dumps({"content": msg_text}, ensure_ascii=False),
+            "msg[timestamp]": str(int(time.time())),
+            "msg[new_face_version]": "0",
+            "msg[dev_id]": dev_id,
+            "from_firework": "0",
+            "build": "0",
+            "mobi_app": "web",
+            "csrf_token": self.csrf,
+            "csrf": self.csrf,
+        }
+        d = await self._post("https://api.vc.bilibili.com/web_im/v1/web_im/send_msg", data=form, params=qparams)
+        msg_key = str((d or {}).get("msg_key") or "")
+        if not msg_key:
+            raise BiliError(-2, "接口未返回投递回执 msg_key（对方可能未开启私信或被拦截）")
+        return msg_key

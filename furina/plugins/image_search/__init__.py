@@ -17,16 +17,16 @@ from nonebot.adapters.onebot.v11.exception import ActionFailed
 from nonebot.rule import Rule
 
 from . import browser, config, download, runtime, search as search_mod
-from ...core import permissions, roles, usage as daily_limits
+from ...core import images, permissions, roles, usage as daily_limits
 from .download import _pick_eagle_consolation, download_image, make_image_segment
 from ...core.task_queue import enqueue_search, queued_search_count
 
 # 待发送图片的临时文件（发送完成后统一清理）
 _pending_image_files = ContextVar("search_pending_image_files", default=None)
 
-# NapCat 新版用无 CQ: 前缀的现代格式 [at:qq=X] / [reply:id=X]，旧版是 [CQ:at,qq=X] / [CQ:reply,id=X]，都要兼容
+# SnowLuma / NapCat 等 OneBot V11 传输端会用无 CQ: 前缀的现代格式 [at:qq=X] / [reply:id=X]，旧版是 [CQ:at,qq=X] / [CQ:reply,id=X]；引用消息 ID 也可能为负数。
 _AT_RE = re.compile(r"\[(?:CQ:)?at[:,]qq=(\d+)\]")
-_REPLY_RE = re.compile(r"\[(?:CQ:)?reply[,:]id=(\d+)\]")
+_REPLY_RE = re.compile(r"\[(?:CQ:)?reply[,:]id=(-?\d+)\]")
 
 
 def _cleanup_pending_images():
@@ -205,23 +205,25 @@ async def handle_pic_search(event):
     try:
         image_data = None
 
-        # 优先从 NapCat 本地缓存获取图片，不用下载，100%成功
-        try:
-            bot = bot_for(event)
-            image_info = await bot.get_image(file=image_file_id)
-            local_path = image_info.get("file", "")
-            if local_path and os.path.exists(local_path):
-                with open(local_path, "rb") as f:
-                    image_data = f.read()
-                logger.info(f"[搜图] 从本地缓存获取图片成功: {local_path}")
-        except Exception as e:
-            logger.warning(f"[搜图] 获取本地缓存失败，尝试下载: {e}")
+        # 优先用协议端本地缓存（NapCat）；SnowLuma 没有本地缓存，但会给一个刚刷新过的下载地址
+        fresh_url = ""
+        if image_file_id:
+            local_path, fresh_url = await images.lookup_image(bot_for(event), image_file_id)
+            if local_path:
+                try:
+                    with open(local_path, "rb") as f:
+                        image_data = f.read()
+                    logger.info(f"[搜图] 从本地缓存获取图片成功: {local_path}")
+                except OSError as e:
+                    logger.warning(f"[搜图] 读本地缓存失败，尝试下载: {e}")
 
-        # 本地没有的话，再尝试下载
+        # 本地没有的话，再尝试下载（先用刷新过的地址，再用消息里的原地址）
         if not image_data:
             try:
-                # 下载图片
-                image_data = await download_image(image_url)
+                for candidate in images.download_candidates(fresh_url, image_url):
+                    image_data = await download_image(candidate)
+                    if image_data:
+                        break
                 if not image_data:
                     await pic_search.finish("❌ 图片下载失败了")
                     return

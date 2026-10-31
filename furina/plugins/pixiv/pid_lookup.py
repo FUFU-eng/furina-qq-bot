@@ -27,7 +27,7 @@ from ...services.pixiv.delivery import SendUncertain, send_work
 from ...services.pixiv.provider import PixivAccessError, PixivDownloadError, PixivError, PixivNetworkError
 
 # 触发词：pid + 一串数字，中间允许空格 / : / ： / #
-PID_RE = re.compile(r"\bpid\s*[:：#]?\s*(\d{4,12})\b", re.IGNORECASE)
+PID_RE = re.compile(r"(?<![a-zA-Z0-9])pid\s*[:：#]?\s*(\d{4,12})(?![0-9a-zA-Z])", re.IGNORECASE)
 # R18 / 屏蔽作品的固定回应
 R18_TEXT = "这张图有露点，小孩子不能看哦~"
 # 收到号码后的固定回应
@@ -46,9 +46,10 @@ def _live():
 
 
 def _plain(event) -> str:
-    """只取消息里的文本段（@ 段会被排除），避免 @ 的 CQ 文本混进来。"""
+    """只取消息里的文本段（@ 段与纯文本 @昵称 都会被剥离），避免紧贴汉字的 pid 漏识别。"""
     raw = getattr(event, "original_message", None) or event.message
-    return "".join(s.data.get("text", "") for s in raw if s.type == "text").strip()
+    txt = "".join(s.data.get("text", "") for s in raw if s.type == "text").strip()
+    return roles.strip_bot_at(txt, str(getattr(event, "self_id", "") or ""))
 
 
 def _pids_in(text: str) -> list[str]:
@@ -200,7 +201,11 @@ async def _lookup(bot, gid, uid, pid: str):
             store.finish(key, "completed", f"已发送 {sent} 页")
         except SendUncertain as exc:
             store.finish(key, "uncertain", str(exc))
-            logger.warning(f"[Pixiv] PID {pid} 发送结果不确定，不重发：{exc}")
+            logger.warning(f"[Pixiv] PID {pid} 图片被QQ拦截或回执超时，发送直链兜底：{exc}")
+            author = str(work.get("userName") or "未知作者")
+            pages_n = int(work.get("pageCount") or 1)
+            mirror = f"https://pixiv.re/{pid}.jpg" if pages_n <= 1 else f"https://pixiv.re/{pid}-1.jpg"
+            await _notice(bot, gid, uid, f"PID {pid}（作者：{author}）的图片被 QQ 拦截发不出来，给你直链看原图：{mirror}")
         except PixivDownloadError as exc:
             store.finish(key, "failed", f"原图下载失败：{exc}")
             await _notice(bot, gid, uid, "原图下载失败了，稍后再试一次吧。")

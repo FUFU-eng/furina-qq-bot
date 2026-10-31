@@ -78,6 +78,40 @@ class NapcatRecoverTest(unittest.TestCase):
         self.assertTrue(nr.pop_owner_notice())
         self.assertFalse(nr.pop_owner_notice())
 
+    def _sync_thread(self):
+        return mock.patch.object(nr.threading, "Thread", side_effect=lambda target, **kw: mock.Mock(start=target))
+
+    def test_resume_after_bot_restart(self):
+        # 掉线后安排了自动恢复，但机器人进程被重启（线程没了）：重新连上时接着做
+        with mock.patch.object(nr.threading, "Thread"):
+            self.assertTrue(nr.schedule_auto("123", "下线通知", "登录已失效"))
+        self.assertEqual(nr.load_state()["pending_qq"], "123")
+        self.assertFalse(nr.resume_pending("999"))  # 别的号连上：不管
+        with mock.patch.object(nr, "status", return_value="offline"), mock.patch.object(nr.time, "sleep"), \
+                mock.patch.object(nr, "relogin") as rl, self._sync_thread():
+            self.assertTrue(nr.resume_pending("123"))
+        rl.assert_called_once()
+        self.assertFalse(nr.resume_pending("123"))  # 只接一次
+
+    def test_manual_relogin_clears_pending(self):
+        nr.save_state(pending_qq="123", pending_at=time.time())
+        nr.relogin("123")
+        self.assertFalse(nr.resume_pending("123"))
+
+    def test_auto_does_not_kill_fresh_qrcode(self):
+        qr = Path(self.tmp) / "cache" / "qrcode.png"
+        qr.write_bytes(b"x")
+        with mock.patch.object(nr, "status", return_value="down"), mock.patch.object(nr.time, "sleep"), \
+                mock.patch.object(nr, "relogin") as rl, self._sync_thread():
+            nr.schedule_auto("123", "ws_lost", "断开")
+        rl.assert_not_called()
+        os.utime(qr, (time.time() - 3600, time.time() - 3600))
+        nr.save_state(last_auto=0)
+        with mock.patch.object(nr, "status", return_value="down"), mock.patch.object(nr.time, "sleep"), \
+                mock.patch.object(nr, "relogin") as rl, self._sync_thread():
+            nr.schedule_auto("123", "ws_lost", "断开")
+        rl.assert_called_once()
+
     def test_panel_defaults_match(self):
         try:
             from panel.classic import settings  # noqa: F401  （面板里也是先导入 settings，再由它导入 settings_env）

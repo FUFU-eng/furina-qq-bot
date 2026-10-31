@@ -551,5 +551,81 @@ class PanelSyncTest(unittest.TestCase):
         self.assertIn("Pixiv ID 取图", app_js)
 
 
+
+
+class ReceiptAndFallbackTest(unittest.TestCase):
+    def test_confirm_history_rejects_local_echo_with_duplicate_real_seq(self):
+        from furina.services.pixiv import qq_receipt
+
+        bot = mock.MagicMock()
+        bot.self_id = BOT
+        md5 = "03f604a3a44aecf7f473e410159f57c4"
+        messages = [
+            {
+                "message_id": 151438404,
+                "real_seq": "824044",
+                "time": 1000,
+                "user_id": BOT,
+                "raw_message": "等着，本芙这就给你端上来",
+                "message": [{"type": "text", "data": {"text": "等着，本芙这就给你端上来"}}],
+            },
+            {
+                "message_id": 243453554,
+                "real_seq": "824044",
+                "time": 1002,
+                "user_id": BOT,
+                "raw_message": f"作者：Escobar · PID：128752034[CQ:image,file={md5}.jpg]",
+                "message": [
+                    {"type": "text", "data": {"text": "作者：Escobar · PID：128752034"}},
+                    {"type": "image", "data": {"file": f"{md5}.jpg"}},
+                ],
+            },
+        ]
+        bot.call_api = mock.AsyncMock(return_value={"messages": messages})
+        with mock.patch.object(qq_receipt, "CONFIRM_DELAYS", (0.0,)):
+            res = asyncio.run(
+                qq_receipt.confirm_history(
+                    bot, 100000001, "作者：Escobar · PID：128752034", [md5], 999
+                )
+            )
+        self.assertIsNone(res)
+
+        messages[1]["real_seq"] = "824045"
+        with mock.patch.object(qq_receipt, "CONFIRM_DELAYS", (0.0,)):
+            res2 = asyncio.run(
+                qq_receipt.confirm_history(
+                    bot, 100000001, "作者：Escobar · PID：128752034", [md5], 999
+                )
+            )
+        self.assertIsNotNone(res2)
+        self.assertEqual(res2["message_id"], 243453554)
+
+    def test_lookup_send_uncertain_replies_with_mirror_link(self):
+        permissions.set_feature_enabled("100000004", "pixiv_id", True)
+        body = {"id": "128752034", "xRestrict": 0, "userName": "Escobar", "pageCount": 1, "illustType": 0}
+        sent = []
+        bot = mock.MagicMock()
+        bot.self_id = BOT
+
+        async def fake_send_group_msg(**kw):
+            sent.append(str(kw.get("message")))
+            return {"message_id": 1}
+
+        bot.send_group_msg = fake_send_group_msg
+        sw = mock.AsyncMock(side_effect=pid_lookup.SendUncertain("QQ 发送未得到成功确认"))
+        store = FakeStore()
+        with mock.patch.object(pid_lookup, "_config", return_value={
+            "enabled": True, "search_cooldown_seconds": 0, "interval_seconds": 0,
+            "cache_mb": 64, "aliases": {},
+        }), mock.patch.object(pixiv_mod, "_client", FakeClient(body)), \
+                mock.patch.object(pixiv_mod, "_store", store), \
+                mock.patch.object(pid_lookup, "send_work", new=sw), \
+                mock.patch.object(pid_lookup, "_sender", return_value=mock.AsyncMock()):
+            asyncio.run(pid_lookup._lookup(bot, 100000004, 20001, "128752034"))
+        self.assertEqual(len(sent), 1)
+        self.assertIn("https://pixiv.re/128752034.jpg", sent[0])
+        self.assertEqual(store.statuses(), ["uncertain"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -109,11 +109,21 @@ def create_app() -> FastAPI:
         return _ok(state=st, busy=ctl.busy, busy_label=ctl.busy_label, bot_qq=qq, nickname=nick,
                    groups=len(live) if live else None, models=data.model_usage_today(),
                    today_chat=data.today_chat_total(), backgrounds=assets.backgrounds(),
-                   now=time.time(), version=__version__)
+                   now=time.time(), version=__version__,
+                   transport_name="SnowLuma" if envfile.get("QQ_TRANSPORT", "napcat").lower() == "snowluma" else "NapCat",
+                   snowluma_confirmed=envfile.get("SNOWLUMA_ACCOUNT_CONFIRMED", "false").lower() in ("1", "true", "yes", "on"),
+                   connected_qq=(st.get("health") or {}).get("user_id", ""))
 
     @app.get("/api/events")
     def events(since: int = 0):
         return _ok(events=ctl.events_since(since))
+
+    @app.post("/api/qq-transport/confirm-account")
+    def confirm_snowluma_account(body: dict = Body(...)):
+        from .services.qq_transport import confirm_account
+        saved = confirm_account(str(body.get("uin") or ""))
+        restarted = ctl.start() if not control.find_bot_processes() else False
+        return _ok(**saved, bot_start_requested=restarted)
 
     @app.post("/api/control/{action}")
     def control_action(action: str):
@@ -132,6 +142,24 @@ def create_app() -> FastAPI:
     def login_state():
         qq = envfile.get("BOT_QQ", "")
         st = ctl.state
+        if envfile.get("QQ_TRANSPORT", "napcat").lower() == "snowluma":
+            gateway = napcat.is_running()
+            live = st.get("health") or {}
+            actual = str(live.get("user_id") or "")
+            confirmed = envfile.get("SNOWLUMA_ACCOUNT_CONFIRMED", "false").lower() in ("1", "true", "yes", "on")
+            if not gateway:
+                state = "snowluma_stopped"
+            elif live.get("state") == "online" and actual and (not confirmed or actual != qq):
+                state = "snowluma_confirm"
+            elif live.get("state") == "online" and confirmed and actual == qq:
+                state = "online"
+            elif live.get("state") == "mismatch":
+                state = "snowluma_confirm"
+            else:
+                state = "snowluma_waiting"
+            return _ok(state=state, provider="snowluma", provider_name="SnowLuma", qq=qq,
+                       detected_qq=actual, confirmed=confirmed, detail=live.get("detail") or "等待连接",
+                       webui=napcat.webui_url(), gateway_running=gateway, qr=False, qr_left=0, warning="")
         if ctl.busy and "NapCat" in ctl.busy_label:
             state = "restarting"
         elif st["health"]["state"] == "online":
@@ -222,7 +250,8 @@ def create_app() -> FastAPI:
     def get_logs(source: str = "bot", pos: int = -1, npos: int = -1, nfile: str = ""):
         nap = {"file": None, "pos": 0, "lines": []} if npos == -2 else \
             logs.napcat_lines(nfile or None, None if npos < 0 else npos)
-        return _ok(bot=logs.bot_lines(source, None if pos < 0 else pos), napcat=nap)
+        return _ok(bot=logs.bot_lines(source, None if pos < 0 else pos), napcat=nap,
+                   transport_name="SnowLuma" if envfile.get("QQ_TRANSPORT", "napcat").lower() == "snowluma" else "NapCat")
 
     @app.get("/api/logs/end")
     def logs_end():
@@ -260,6 +289,31 @@ def create_app() -> FastAPI:
         data.save_roles(body.get("roles") or [])
         return _ok()
 
+    @app.post("/api/roles/reset")
+    def reset_role(body: dict = Body(...)):
+        role = data.reset_role_prompt(str(body.get("role_id") or "furina"))
+        return _ok(role=role, roles=data.roles())
+
+    @app.get("/api/black_book")
+    def get_black_book():
+        return _ok(items=data.black_book())
+
+    @app.post("/api/black_book")
+    def add_black_book(body: dict = Body(...)):
+        res = data.add_black_book(
+            who=str(body.get("who") or ""),
+            nickname=str(body.get("nickname") or ""),
+            event=str(body.get("event") or ""),
+            gid=str(body.get("gid") or ""),
+        )
+        if not res.get("ok"):
+            raise ValueError(str(res.get("reason") or "添加失败"))
+        return _ok(entry=res.get("entry"), items=data.black_book())
+
+    @app.delete("/api/black_book/{eid}")
+    def del_black_book(eid: str):
+        return _ok(deleted=data.delete_black_book(eid), items=data.black_book())
+
     @app.post("/api/roles/activate")
     def activate_role(body: dict = Body(...)):
         qq = envfile.get("BOT_QQ", "")
@@ -286,6 +340,7 @@ def create_app() -> FastAPI:
     @app.get("/api/accounts")
     def get_accounts():
         return _ok(accounts=data.profiles(), bot_qq=envfile.get("BOT_QQ", ""),
+                   transport_name="SnowLuma" if envfile.get("QQ_TRANSPORT", "napcat").lower() == "snowluma" else "NapCat",
                    roles=[{"id": r.get("id"), "name": r.get("name")} for r in data.roles()])
 
     @app.post("/api/accounts")
@@ -308,6 +363,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/accounts/use")
     def use_account(body: dict = Body(...)):
+        if envfile.get("QQ_TRANSPORT", "napcat").lower() == "snowluma":
+            raise ValueError("SnowLuma账号必须先在本地管理页手动加载，再从登录助手确认；不能通过旧的NapCat账号切换动作自动登录")
         qq = str(body.get("qq", ""))
         if not qq.isdigit():
             raise ValueError("QQ 号格式不正确")
@@ -439,6 +496,31 @@ def create_app() -> FastAPI:
     def bili_slang_delete(body: dict = Body(...)):
         bili_panel.delete_slang(str(body.get("term") or ""))
         return _ok()
+
+    # ---------------- 全局画师图片订阅 ----------------
+    @app.get("/api/bili-pics")
+    def get_bili_pics():
+        return _ok(**data.bili_pics_data())
+
+    @app.post("/api/bili-pics/settings")
+    def save_bili_pics(body: dict = Body(...)):
+        return _ok(**data.save_bili_pics(body))
+
+    @app.post("/api/bili-pics/subscriptions")
+    def add_bili_pic(body: dict = Body(...)):
+        return _ok(**data.add_bili_pic(str(body.get("target") or "")))
+
+    @app.delete("/api/bili-pics/subscriptions/{uid}")
+    def remove_bili_pic(uid: str):
+        return _ok(removed=data.remove_bili_pic(uid))
+
+    @app.post("/api/bili-pics/check")
+    def check_bili_pics():
+        return _ok(queued=data.check_bili_pics())
+
+    @app.post("/api/bili-pics/retry")
+    def retry_bili_pics(body: dict = Body(...)):
+        return _ok(retried=data.retry_bili_pics(body.get("confirmed") is True))
 
     # ---------------- 设置：活人感 / 语音 / B站生活（统一定义见 services/huoren_settings.py） ----------------
     @app.get("/api/envgroup/{name}")

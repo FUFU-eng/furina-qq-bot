@@ -8,10 +8,10 @@ _config = env.config_ns  # 旧键名，改读 .env
 # 总开关：true=启用，false=停用
 RELAY_ENABLED = str(getattr(_config, "relay_enabled", "true")).lower() == "true"
 
-# 源群：监听群主发图的群（主群）
+# 源群：监听群主发图的群（圣芙蕾雅学园）
 RELAY_SOURCE_GROUP = int(getattr(_config, "relay_source_group", 0))
 
-# 目标群：把图转发到的群（分群）
+# 目标群：把图转发到的群（圣芙蕾雅分园）
 RELAY_TARGET_GROUP = int(getattr(_config, "relay_target_group", 0))
 
 # 群主 QQ 号：只有这个 QQ 在源群发的图片才会被转发

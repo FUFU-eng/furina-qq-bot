@@ -145,18 +145,26 @@ def _note_unsent(group_id, message, why: str) -> None:
 
 
 def prepare_message(message):
-    """人格聊天发送前的最后一道标点闸门，仅处理顶层文字，不改媒体、引用或转发原文。"""
-    if not config.NO_PERIOD:
-        return message
+    """聊天发送前的文字闸门：清占位串和标点，不改媒体、引用或转发原文。"""
     from nonebot.adapters.onebot.v11 import Message, MessageSegment
-    from .cleanup import drop_periods
+    from .cleanup import drop_periods, strip_qq_placeholders
+
+    removed_placeholder = False
 
     def clean_text(value):
+        nonlocal removed_placeholder
         if not value or not value.strip():
+            return value
+        cleaned = strip_qq_placeholders(value)
+        changed = cleaned != value
+        removed_placeholder = removed_placeholder or changed
+        if not config.NO_PERIOD and not changed:
             return value
         leading = value[:len(value) - len(value.lstrip())]
         trailing = value[len(value.rstrip()):]
-        body = drop_periods(value)
+        body = cleaned.strip()
+        if config.NO_PERIOD:
+            body = drop_periods(body)
         return leading + body + trailing if body else ""
 
     if isinstance(message, str):
@@ -164,7 +172,10 @@ def prepare_message(message):
     if isinstance(message, MessageSegment):
         if message.type != "text":
             return message
-        return MessageSegment("text", {**message.data, "text": clean_text(str(message.data.get("text") or ""))})
+        value = clean_text(str(message.data.get("text") or ""))
+        if not config.NO_PERIOD and not removed_placeholder:
+            return message
+        return MessageSegment("text", {**message.data, "text": value})
     if isinstance(message, Message):
         out, run = [], []
         def flush():
@@ -180,6 +191,16 @@ def prepare_message(message):
                 flush()
                 out.append(seg)
         flush()
+        # 纯占位串被剥掉后，即使还留着 at/reply，也不能变成空艾特发出去。
+        # 本来就有意单发 at 的消息不受影响，真实图片/表情/转发也照常发送。
+        if removed_placeholder and not any(
+            seg.type not in ("at", "reply", "text")
+            or (seg.type == "text" and str(seg.data.get("text") or "").strip())
+            for seg in out
+        ):
+            return Message()
+        if not config.NO_PERIOD and not removed_placeholder:
+            return message
         return Message(out)
     return message
 
@@ -201,7 +222,7 @@ def guarded(sender, group_id):
     async def _send(message):
         message = prepare_message(message)
         if _empty_message(message):
-            return None  # 只剩句号时不向QQ发送空消息，也不计为发送失败
+            return None  # 只剩占位串或句号时不发空消息，也不计为发送失败
         ok, why = allow_send(group_id)
         if not ok:
             logger.warning(f"[AI聊天] 群{group_id} 跳过发送：{why}")

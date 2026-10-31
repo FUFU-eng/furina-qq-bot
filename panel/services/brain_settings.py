@@ -6,6 +6,7 @@
 
 MODE_CHOICES = ["二代仿真", "一代仿真", "聊天", "Agent"]
 THINK_CHOICES = ["不思考", "低", "高", "最高", "自动"]
+CUSTOM_PROTOCOL_CHOICES = ["Anthropic 原生（Messages）", "OpenAI 兼容（Chat Completions）", "OpenAI Responses"]
 R = {"restart": True}
 
 
@@ -34,6 +35,11 @@ BRAIN = [
         ("AI_CHAT_WAKE_FOLLOW_SECONDS", "说完话后跟着看一会儿", "int", 90,
          "她在群里说完话的这段时间内，有人再发消息就醒来看看是不是在接她的话（不一定回）。"
          "这样她不用守着等人接话，聊得更连贯。0 = 关。", _o(max=600, suffix="秒")),
+        ("AI_CHAT_WAKE_FOLLOW_GATE", "接话前先判断是不是在跟她说", "bool", True,
+         "「说完话后跟着看一会儿」醒来前，先用免费模型（没开免费模型就用付费模型，几百 token 不到一厘）判断新消息是不是在接她的话，"
+         "不是就不叫醒她。主人说话总会看。关掉 = 每条都叫醒（贵）。", {}),
+        ("AI_CHAT_WAKE_PEAK_FACTOR", "高峰时段少醒一点", "pct", 0.6,
+         "工作日 9–12、14–18 点 DeepSeek 价格翻倍：这时「接话」「潜水久了」醒来的概率乘这个数。100% = 不减。", {}),
         ("AI_CHAT_WAKE_IDLE_MINUTES", "潜水多久后醒来看看", "int", 30,
          "她这么久没看群 / 没说话后，下一条群消息会让她醒来刷一下。0 = 不按时间醒。", _o(max=1440, suffix="分钟")),
         ("AI_CHAT_WAKE_RANDOM", "随机醒来概率", "pct", 0.05, "每条群消息有这么大概率让她顺手刷一下群。0 = 不随机醒。", {}),
@@ -45,6 +51,9 @@ BRAIN = [
     ("二代仿真：说话手感", "让她说话更像真人群友。", [
         ("AI_CHAT_SIM2_SCENES", "带上示例场景", "bool", True,
          "每次醒来按群里在聊的内容，挑一两个「这种场合真人一般怎么回」的例子给她参考（只学长短和分寸，不照抄）。", {}),
+        ("AI_CHAT_COMMITMENTS", "到点提醒 · 答应的事到点兑现", "bool", True,
+         "群里谁让她「8点提醒我」「半小时后叫我」「明天提醒小明交作业」，她都会记下来，到点在群里艾特那个人提醒（每人最多同时记 5 件，30 天以内）。"
+         "她自己说了「等下发你」「明天帮你看看」也会记着，到点叫醒她兑现（做不到会直说，拖久了先道歉）。", {}),
     ]),
     ("思考强度", "回复前先「想一想」：更聪明、更少答非所问，但更慢、更贵（思考的字数按输出价计费）。"
                  "改完从下一条消息开始生效，不用重启。今天思考花了多少钱见下面「今天的花费」。", [
@@ -59,6 +68,23 @@ BRAIN = [
          "有人艾特 / 引用 / 叫她名字、但不像在提问时（比如「唱歌给我听」「你去找张图」）想多深。"
          "低 = 花很少的钱先理清谁在跟谁说话、对方要什么，接话更通顺；不思考 = 和以前一样。",
          _o(choices=["不思考", "低", "高"])),
+        ("AI_CHAT_THINKING_AUTO_FOLLOW", "「自动」时接话想多深", "choice", "低",
+         "她刚说完、有人接着说话时（二代仿真「接话」醒来）想多深。随手刷到 / 潜水久了醒来不思考。",
+         _o(choices=["不思考", "低", "高"])),
+    ]),
+    ("省钱：花钱感知", "参考 fatfish-bot：最近 24 小时花得越多，她越懒得「没人叫也开口」；被艾特 / 叫名字 / 引用永远照回。"
+                       "积极性 = 保底 + (1 − 保底) ÷ (1 + (花费 ÷ 半衰点)^陡峭度)。「模型花费」页的看板能看到她现在的积极性。", [
+        ("AI_CHAT_BUDGET_ENABLED", "花钱感知", "bool", True, "总开关。关掉 = 只看下面的每日上限。", {}),
+        ("AI_CHAT_BUDGET_HALF_YUAN", "半衰点", "dec", 1.0,
+         "最近 24 小时花到这么多元时，积极性降到一半左右（接话概率约 22%、随手刷到约 12%）。想每天花得更少就调小。",
+         _o(min=0.05, max=100, decimals=2, suffix="元")),
+        ("AI_CHAT_BUDGET_K", "陡峭度", "dec", 4.0, "越大越像开关（没到半衰点几乎不减，过了就很快变懒）；越小越平缓。",
+         _o(min=0.2, max=12, decimals=1)),
+        ("AI_CHAT_BUDGET_FLOOR", "保底积极性", "pct", 0.1, "花再多也留这么一点点积极性。", {}),
+        ("AI_CHAT_DAILY_CAP_YUAN", "每日上限", "dec", 3.0,
+         "今天花到这么多元后：只回被艾特 / 叫名字 / 引用的，而且不开思考。0 = 不限。", _o(max=1000, decimals=2, suffix="元")),
+        ("AI_CHAT_GROUP_DAILY_CAP_YUAN", "每个群每日上限", "dec", 0.0,
+         "某个群今天在二代仿真上花到这么多元后，这个群只回被叫到的。0 = 不限。", _o(max=1000, decimals=2, suffix="元")),
     ]),
     ("省钱：免费模型", "打开后普通文字请求先走本机的免费模型服务（our-free-model），不行就自动换回付费 DeepSeek，"
                        "免费线路随后歇一会儿再试，不会卡住回复。带图的请求、二代仿真内核仍走付费模型。"
@@ -90,9 +116,15 @@ BRAIN = [
                                          "用到时才在后台启动（无窗口），空闲一段时间自己退出。", [
         ("AI_CHAT_DSH_MAX_STEPS", "每次醒来最多几步", "int", 8, "一步 = 一次模型请求；到了就收手，防止绕圈烧钱。", _o(min=2, max=40, suffix="步")),
         ("AI_CHAT_DSH_TIMEOUT", "每次醒来最长", "int", 120, "超时就结束这一轮。", _o(min=20, max=900, suffix="秒")),
-        ("AI_CHAT_DSH_CONTEXT_MAX_K", "群会话最长多少（省钱）", "int", 60,
+        ("AI_CHAT_DSH_CONTEXT_MAX_K", "群会话最长多少（省钱）", "int", 30,
          "每次醒来都要把这个群的会话整个发给模型一遍，会话越长越贵。超过这么多（千 token）就换新会话，"
          "带上最近的聊天接着聊；人物记忆、口味、设定不受影响。调大 = 记得更远但更贵；0 = 不限（最贵）。", _o(max=900, suffix="千 token")),
+        ("AI_CHAT_DSH_END_AFTER_SAY", "说完 / 潜水后直接结束这一轮", "bool", True,
+         "她用 qq_say 发出去（或决定潜水）后马上结束这一轮，不再让模型多请求一次「好，结束」——那一次也要把整段会话重发一遍。"
+         "想连发就在一次 qq_say 里放多条。关掉 = 和以前一样。", {}),
+        ("AI_CHAT_SIM2_DYNAMIC_MAX", "每轮「状态」最多多少字", "int", 1500,
+         "心情、长期记忆、纪要、活人感这些「此刻」提示每轮最多给这么多字；同一个会话里已经给过的段落不再重发"
+         "（会话里本来就有，重发只会让会话越滚越长）。换新会话时重新给全。0 = 不给。", _o(max=6000, suffix="字")),
         ("AI_CHAT_DSH_RECAP_LINES", "换新会话时带上最近几条", "int", 30, "也用于机器人重启后第一次醒来。", _o(min=5, max=120, suffix="条")),
         ("AI_CHAT_DSH_MERGE_SECONDS", "被叫到后先等一下", "dec", 4.0, "等对方把话说完再醒来一起看。", _o(max=30, decimals=1, suffix="秒")),
         ("AI_CHAT_DSH_FALLBACK", "内核出错时用一代回复", "bool", True, "被艾特 / 叫到时内核出错或没装好，就按一代仿真回这一条。", {}),
@@ -103,6 +135,25 @@ BRAIN = [
          "DSH 走 DeepSeek 的 Messages（Anthropic 兼容）接口；留空 = 官方地址，密钥用「AI 模型」页那个。", {}),
         ("AI_CHAT_DSH_RUNTIME_DIR", "运行时目录", "text", r"G:\FurinaDshRuntime", "官方 SDK 装在这里（约 80MB）。", R),
         ("AI_CHAT_DSH_PORT", "本机端口", "int", 53212, "内核只监听本机；这个端口和下一个端口被占用时改一下。", dict(min=1024, max=65533, restart=True)),
+    ]),
+    ("外接模型（二代仿真 / Agent）", "用别家的模型代替 DeepSeek 跑二代仿真和 Agent。外接接口连不上或出错时自动先用 DeepSeek，"
+                                 "过几分钟再试外接；换线路时群里会开新会话，带上最近的聊天接着聊。改完空闲时自动生效。", [
+        ("AI_CHAT_DSH_CUSTOM_ENABLED", "用外接模型", "bool", False,
+         "打开并填好下面的地址和模型名字后生效。关掉 = 二代仿真和 Agent 都用 DeepSeek。", {}),
+        ("AI_CHAT_DSH_CUSTOM_BASE_URL", "接口地址", "text", "",
+         "例如 http://127.0.0.1:18765。Anthropic 原生协议不用写后面的 /v1/messages；OpenAI 兼容一般写到 /v1。", {}),
+        ("AI_CHAT_DSH_CUSTOM_API_KEY", "接口密钥", "secret", "", "", {}),
+        ("AI_CHAT_DSH_CUSTOM_MODEL", "模型名字", "text", "", "和对方给的模型名一字不差。", {}),
+        ("AI_CHAT_DSH_CUSTOM_PROTOCOL", "接口协议", "choice", "Anthropic 原生（Messages）",
+         "对方说是哪种就选哪种。", _o(choices=CUSTOM_PROTOCOL_CHOICES)),
+        ("AI_CHAT_DSH_CUSTOM_CONTEXT_K", "模型最多能看多长", "int", 200,
+         "模型的上下文长度。不知道就保持 200；上面的「群会话最长多少」照样起作用。", _o(min=16, max=2000, suffix="千 token")),
+        ("AI_CHAT_DSH_CUSTOM_COOLDOWN_MIN", "出错后先用 DeepSeek 多久", "int", 5,
+         "外接接口连不上 / 出错后，这段时间内先用 DeepSeek，到点再试外接。", _o(min=1, max=1440, suffix="分钟")),
+        ("AI_CHAT_DSH_CUSTOM_PRICE_HIT", "价格：缓存命中", "dec", 0.0,
+         "每百万 token 多少元，只用来在「模型花费」里算钱（记在「·外接」那几行）。免费就保持 0。", _o(max=1000, decimals=2, suffix="元")),
+        ("AI_CHAT_DSH_CUSTOM_PRICE_MISS", "价格：输入", "dec", 0.0, "", _o(max=1000, decimals=2, suffix="元")),
+        ("AI_CHAT_DSH_CUSTOM_PRICE_OUT", "价格：输出", "dec", 0.0, "", _o(max=1000, decimals=2, suffix="元")),
     ]),
     ("Agent（主人派活操作电脑）", "主人私聊她派活（二代仿真的群里直接说也行），她可以在这台电脑上用命令行、读写文件来完成。默认关闭。"
                                "发「新会话」可以清空 Agent 的上下文。", [

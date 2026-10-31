@@ -29,7 +29,7 @@ _CALLS_HER = re.compile(r"芙芙|芙宁娜|水神|芙卡洛斯")
 
 # NapCat 新版用无 CQ: 前缀的现代格式 [at:qq=X]，旧版是 [CQ:at,qq=X]，都要兼容
 _AT_RE = re.compile(r"\[(?:CQ:)?at[:,]qq=(\d+)\]")
-_REPLY_RE = re.compile(r"\[(?:CQ:)?reply[,:]id=(\d+)\]")
+_REPLY_RE = re.compile(r"\[(?:CQ:)?reply[,:]id=(-?\d+)\]")
 
 # 与搜图插件 google_image_search._check_trigger 完全一致的触发词（唯一触发：引用图 + 艾特 + “搜图”）。
 # 旧版这里用了宽得多的“自然语言搜图意图”（出处/来源/哪来的/这是什么东西…）：聊天插件因此放弃回复，
@@ -364,12 +364,13 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
             if not has_at_bot and any(a and a in heard for a in roles.aliases()):
                 has_at_bot = True
 
-    # 群友直接发的合并转发 / 聊天记录：展开成「谁: 说了什么」，不然她只看到一条空消息
+    forward_image_segments = []
+    # 群友直接发的合并转发 / 聊天记录：展开文字，并记录其中的图片供本轮视觉输入使用
     if "[合并转发]" in current_text:
         try:
             from .quotes import forward_text
 
-            expanded = await forward_text(event.message, bot_for(event))
+            expanded = await forward_text(event.message, bot_for(event), image_segments=forward_image_segments)
         except Exception as e:  # noqa: BLE001
             logger.debug(f"[AI聊天] 展开合并转发失败: {e}")
             expanded = ""
@@ -386,8 +387,15 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
     # 调 get_msg，而绝大多数消息既没艾特机器人也不会触发随机接话（默认 2%），白白消耗带宽和
     # NapCat 调用。艾特机器人 / 开启了后台图片描述时照旧提前读取；随机接话命中后再补读。
     vision_images, first_image_entry = [], None
-    if has_image and (has_at_bot or config.CHAT_IMAGE_DESC):
-        vision_images, first_image_entry = await _collect_message_images(event, group_id)
+    if ((has_image and (has_at_bot or config.CHAT_IMAGE_DESC))
+            or (forward_image_segments and has_at_bot)):
+        vision_images, first_image_entry = await _collect_message_images(
+            event, group_id,
+            extra_image_segments=forward_image_segments if has_at_bot else None,
+        )
+        # 转发图只附加到本轮 prompt，不额外启动后台图像描述模型调用。
+        if not has_image:
+            first_image_entry = None
 
     # 读取引用内容（含合并转发）
     quote = None
@@ -545,8 +553,10 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
 
     # ===== 未艾特：TA 刚艾特过机器人、还在等回复时，接着说的话并进那一轮 =====
     if turns.is_open(group_id, user_id):
-        if has_image and not vision_images:
-            vision_images, _ = await _collect_message_images(event, group_id)
+        if (has_image or forward_image_segments) and not vision_images:
+            vision_images, _ = await _collect_message_images(
+                event, group_id, extra_image_segments=forward_image_segments
+            )
         if turns.append(group_id, user_id, current_text, has_image, meta.get("mid"), vision_images):
             logger.info(f"[AI聊天] 群{group_id} {nickname} 补充了一句，并入正在进行的回复")
             return
@@ -590,8 +600,10 @@ async def handle_chat(event: GroupMessageEvent, matcher) -> None:
     if random.random() >= eff_prob:
         return
     # 随机接话命中后才读取本条图片和引用（见上方说明）
-    if has_image and not vision_images:
-        vision_images, _ = await _collect_message_images(event, group_id)
+    if (has_image or forward_image_segments) and not vision_images:
+        vision_images, _ = await _collect_message_images(
+            event, group_id, extra_image_segments=forward_image_segments
+        )
     if has_reply and quote is None:
         quote = await _fetch_quote(event)
     if memory.replied_text(group_id, meta.get("mid")) is not None:

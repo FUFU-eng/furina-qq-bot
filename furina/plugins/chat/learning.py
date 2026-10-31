@@ -77,7 +77,7 @@ def _is_style_note(note: str) -> bool:
     note = (note or "").strip()
     if not note or len(note) > 80:
         return False
-    return not any(k in note for k in ("群圣经", "？", "?", "是什么", "吗", "呢", "分别是什么", "认不清角色"))
+    return not any(k in note for k in ("圣芙蕾雅圣经", "？", "?", "是什么", "吗", "呢", "分别是什么", "认不清角色"))
 
 
 def _recent_uids(gid, n: int = 40) -> set:

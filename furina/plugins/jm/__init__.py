@@ -94,10 +94,22 @@ async def _send_group_file(bot, group_id: int, pdf_path: str, filename: str):
 
 
 def _response_ok(resp) -> bool:
-    """判断 OneBot 返回是否成功。NapCat 失败时返回 status=failed + retcode=200。"""
+    """判断 OneBot 返回是否成功。
+
+    - 原始信封（带 status）：NapCat 失败时返回 status=failed + retcode=200，不能当成功；
+    - 适配器已解包的 data（不带 status，如 SnowLuma 的 {"file_id": ...}）：NoneBot 遇到失败会直接抛
+      ActionFailed，能拿到 data 就说明协议端已确认成功；
+    - None：协议端没给任何确认，交给群历史核查。
+    """
     if not isinstance(resp, dict):
         return bool(resp)
-    return str(resp.get("status", "")).lower() == "ok" and int(resp.get("retcode") or 0) == 0
+    if "status" not in resp and "retcode" not in resp:
+        return True
+    try:
+        retcode = int(resp.get("retcode") or 0)
+    except (TypeError, ValueError):
+        return False
+    return str(resp.get("status", "")).lower() == "ok" and retcode == 0
 
 
 def _history_messages(hist) -> list:

@@ -189,5 +189,175 @@ class ReplyPanelTest(unittest.TestCase):
             self.assertIn(needle, js)
 
 
+class StoryboardAndDmTest(unittest.TestCase):
+    def setUp(self):
+        _reset()
+        _env.write_env(_BASE + "BILI_MENTION_NAME=旅行者主人\nBILI_PARTNER_MID=777\n")
+        bili_store.save_auth({"SESSDATA": "s", "bili_jct": "j", "DedeUserID": "1"}, uname="芙芙", mid="1")
+
+    def tearDown(self):
+        _env.write_env(_BASE)
+
+    def test_storyboard_snapshot_and_pvdata_and_grid(self):
+        import io
+        import struct
+        from PIL import Image
+        from furina.services.bilibili import storyboard
+
+        # 6 小时视频（21600秒）不会被误判成毫秒
+        entries = storyboard._snapshot_entries({"index": [10, 3600, 21000]}, duration=21600)
+        self.assertEqual(entries, [(10.0, 0), (3600.0, 1), (21000.0, 2)])
+        # 毫秒时间戳（超过时长 1.5 倍）自动归一成秒
+        entries_ms = storyboard._snapshot_entries({"index": [5000, 15000, 25000]}, duration=30)
+        self.assertEqual(entries_ms, [(5.0, 0), (15.0, 1), (25.0, 2)])
+
+        # pvdata 大端 uint16 兜底
+        raw_pv = struct.pack(">4H", 3, 12, 24, 36)
+        with mock.patch.object(storyboard, "_fetch_bytes", mock.AsyncMock(return_value=raw_pv)):
+            pv_entries = asyncio.run(storyboard._entries_from_pvdata({"pvdata": "http://i0.hdslb.com/bfs/pv.bin"}))
+        self.assertEqual(pv_entries, [(3.0, 0), (12.0, 1), (24.0, 2), (36.0, 3)])
+        self.assertNotIn("Cookie", storyboard._image_headers())
+
+        # 烧录编号与 3×3 拼图
+        tile = Image.new("RGB", (480, 270), (60, 90, 140))
+        grid_bytes = storyboard._assemble_grid([(tile, float(i * 10)) for i in range(1, 10)])
+        self.assertTrue(len(grid_bytes) > 1000)
+
+        # 句末标点截断
+        txt = "第一句话很完整。第二句话也很完整！第三句话被截断在半路没有标点符号"
+        self.assertEqual(storyboard.truncate_at_sentence(txt, 20), "第一句话很完整。第二句话也很完整！…")
+
+    def test_style_guard_three_layers(self):
+        from furina.plugins.bilibili import surf
+
+        self.assertEqual(surf.clean_line("不得不说，这猫跳得比我还高", 60), "这猫跳得比我还高")
+        self.assertEqual(surf.clean_line("值得一看！", 60), "")
+        self.assertTrue(surf.check_comment_style("有一说一这视频真不错"))
+        bili_store.add_post("comment", "三分半那个走位简直离谱笑死我了", bvid="BV1")
+        self.assertIn("跟自己以前", surf.check_comment_style("三分半那个走位简直离谱笑死我"))
+        hot = [{"text": "老板连夜扛着火车跑路了哈哈哈哈"}]
+        self.assertIn("热评撞车", surf.check_comment_style("老板连夜扛着火车跑路了哈哈哈", hot_comments=hot))
+        self.assertEqual(surf.check_comment_style("草莓蛋糕居然还能这么切，本芙宁娜学会了", hot_comments=hot), "")
+
+    def test_owner_dm_two_way_and_share_card(self):
+        r = _mod()
+        from furina.services.bilibili import storyboard
+
+        now = int(time.time())
+        fake_msgs = [
+            {"key": "k1", "ts": now - 20, "from_me": False, "kind": 7,
+             "text": "[分享视频] 芙宁娜手书 / 某UP BV1xx411c7mD", "bvid": "BV1xx411c7mD"},
+        ]
+        bili_store.set_meta("dm_seen", ["k0"])
+        fake_vd = {
+            "ok": True, "bvid": "BV1xx411c7mD", "title": "芙宁娜手书", "up": "某UP",
+            "duration": "02:30", "desc": "手书动画", "subtitle": "今夜星光闪耀。",
+            "storyboard_scenes": "#1(00:15) 芙宁娜站在歌剧院舞台中央；#2(00:45) 灯光亮起。",
+            "danmaku": ["太美了"], "hot_comments": ["网友(赞99)：神仙手书"],
+        }
+        send_dm = mock.AsyncMock(return_value="msg_key_123")
+        with mock.patch.object(r.Client, "ensure_buvid", mock.AsyncMock()),                 mock.patch.object(r.Client, "dm_messages", mock.AsyncMock(return_value=fake_msgs)),                 mock.patch.object(r.Client, "send_dm", send_dm),                 mock.patch.object(r, "_partner", mock.AsyncMock(return_value=("旅行者主人", "777"))),                 mock.patch.object(storyboard, "watch_video_detail", mock.AsyncMock(return_value=fake_vd)) as wv,                 mock.patch.object(r.surf, "_llm", mock.AsyncMock(return_value="哼，第一幕歌剧院那个灯光确实很有本芙宁娜的排面！")) as llm,                 mock.patch.object(r.surf, "_pause", mock.AsyncMock()):
+            out = asyncio.run(r.check_owner_dm())
+            self.assertIn("回了旅行者主人的私信", out)
+            wv.assert_awaited_once()
+            send_dm.assert_awaited_once_with("777", "哼，第一幕歌剧院那个灯光确实很有本芙宁娜的排面！")
+            self.assertIn("3×3画面分镜", llm.await_args.args[1])
+            # 第二次轮询无新私信：0 token（不调大模型）
+            llm.reset_mock()
+            out2 = asyncio.run(r.check_owner_dm())
+            self.assertEqual(out2, "")
+            llm.assert_not_awaited()
+
+
+
+
+class MiniAppCardShareTest(unittest.IsolatedAsyncioTestCase):
+    def test_split_share_bubbles(self):
+        from furina.services.bilibili.storyboard import split_share_bubbles
+
+        b1 = split_share_bubbles("这个好诶｜@主人 能不能给我加一个")
+        self.assertEqual(b1, ["这个好诶", "@主人 能不能给我加一个"])
+
+        b2 = split_share_bubbles("这个好诶 @主人 能不能给我加一个")
+        self.assertEqual(b2, ["这个好诶", "@主人 能不能给我加一个"])
+
+        b3 = split_share_bubbles(["这个好诶 https://www.bilibili.com/video/BV1xx411c7mD", "@主人 能不能给我加一个"])
+        self.assertEqual(b3, ["这个好诶", "@主人 能不能给我加一个"])
+
+    def test_surf_clean_line_keeps_at_for_share(self):
+        from furina.plugins.bilibili import surf
+
+        self.assertEqual(
+            surf.clean_line("这个好诶｜@主人 能不能给我加一个", 60, keep_at=True),
+            "这个好诶｜@主人 能不能给我加一个",
+        )
+        self.assertEqual(
+            surf.clean_line("这个好诶 @主人", 60, keep_at=False),
+            "这个好诶",
+        )
+
+    async def test_send_bili_card_and_bubbles_with_miniapp_ark(self):
+        from furina.services.bilibili.storyboard import send_bili_card_and_bubbles
+
+        class FakeBot:
+            async def call_api(self, api: str, **kwargs):
+                if api == "get_mini_app_ark":
+                    return {
+                        "app": "com.tencent.miniapp_01",
+                        "view": "view_8C8E89B49BE609866298ADDFF2DBABA4",
+                        "prompt": f"[QQ小程序]{kwargs.get('desc')}",
+                        "meta": {
+                            "detail_1": {
+                                "appid": "1109937557",
+                                "title": kwargs.get("title"),
+                                "desc": kwargs.get("desc"),
+                                "preview": kwargs.get("picUrl"),
+                                "qqdocurl": kwargs.get("jumpUrl"),
+                            }
+                        },
+                    }
+                return {}
+
+        sent_msgs = []
+
+        async def fake_sender(msg):
+            sent_msgs.append(msg)
+            return {"message_id": len(sent_msgs)}
+
+        async def fast_pause(_b):
+            return None
+
+        info = {
+            "ok": True,
+            "bvid": "BV1xx411c7mD",
+            "url": "https://www.bilibili.com/video/BV1xx411c7mD",
+            "title": "用 OpenClaw 捏出来的 AI 桌宠",
+            "desc": "UP主：测试UP",
+            "pic": "https://i0.hdslb.com/bfs/archive/test.jpg",
+        }
+        res = await send_bili_card_and_bubbles(
+            FakeBot(),
+            fake_sender,
+            info,
+            comments=["这个好诶", "@主人 能不能给我加一个"],
+            owner_qq="200000001",
+            pause_fn=fast_pause,
+        )
+        self.assertTrue(res["ok"])
+        self.assertTrue(res["card"])
+        self.assertEqual(res["sent"], 3)
+        self.assertEqual(len(sent_msgs), 3)
+        # 第1条是 json 卡片
+        self.assertEqual(sent_msgs[0][0].type, "json")
+        self.assertIn("com.tencent.miniapp_01", sent_msgs[0][0].data["data"])
+        self.assertIn("用 OpenClaw 捏出来的 AI 桌宠", sent_msgs[0][0].data["data"])
+        # 第2条是短评气泡
+        self.assertEqual(str(sent_msgs[1]), "这个好诶")
+        # 第3条是 @主人 + 短评气泡
+        self.assertEqual(sent_msgs[2][0].type, "at")
+        self.assertEqual(str(sent_msgs[2][0].data["qq"]), "200000001")
+        self.assertIn("能不能给我加一个", str(sent_msgs[2]))
+
+
 if __name__ == "__main__":
     unittest.main()

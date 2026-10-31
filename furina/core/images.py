@@ -1,4 +1,4 @@
-"""图片获取与编码：优先 NapCat 本地缓存，失败再下载；统一校验、缩放、转 data URL。"""
+"""图片获取与编码：优先协议端本地缓存（NapCat），其次协议端刷新过的下载地址（SnowLuma），再退回消息里的原地址；统一校验、缩放、转 data URL。"""
 from __future__ import annotations
 
 import asyncio
@@ -40,26 +40,64 @@ def is_valid_image(data: bytes) -> bool:
         return False
 
 
-async def fetch_image_bytes(bot, file_id: str, url: str, timeout: float = 12.0) -> bytes | None:
-    if file_id:
-        try:
-            info = await bot.get_image(file=file_id)
-            local = info.get("file", "") if isinstance(info, dict) else getattr(info, "file", "")
-            if local:
-                # 读盘 + 校验放到线程里，不卡住事件循环（大图/机械硬盘时明显）
-                data = await asyncio.to_thread(_read_valid, local)
-                if data:
-                    return data
-        except Exception as e:
-            logger.debug(f"[图片] 本地缓存获取失败: {e}")
-    if not url:
-        return None
+def media_info_source(info) -> tuple[str, str]:
+    """get_image 的返回 → (本地文件路径, 新下载地址)。
+
+    NapCat 的 file 是本地缓存路径；SnowLuma 没有本地缓存，file/url 都是刚向 QQ 刷新过的下载地址。
+    """
+    if isinstance(info, dict):
+        values = [info.get(k) for k in ("file", "path", "url")]
+    else:
+        values = [getattr(info, k, "") for k in ("file", "path", "url")]
+    local = fresh = ""
+    for raw in values:
+        v = str(raw or "").strip()
+        if not v:
+            continue
+        if v.lower().startswith(("http://", "https://")):
+            fresh = fresh or v
+        elif not local and os.path.isfile(v):
+            local = v
+    return local, fresh
+
+
+async def lookup_image(bot, file_id: str, timeout: float | None = None) -> tuple[str, str]:
+    """问协议端要这张图：返回 (本地文件路径, 新下载地址)，拿不到就是空串。"""
+    if not file_id:
+        return "", ""
     try:
-        resp = await (await _get_client()).get(url, timeout=timeout)
-        if resp.status_code == 200 and await asyncio.to_thread(is_valid_image, resp.content):
-            return resp.content
-    except Exception as e:
-        logger.debug(f"[图片] 下载失败: {e}")
+        call = bot.get_image(file=file_id)
+        info = await (asyncio.wait_for(call, timeout) if timeout else call)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[图片] get_image 失败: {e}")
+        return "", ""
+    return media_info_source(info)
+
+
+def download_candidates(fresh: str, url: str) -> list[str]:
+    """先用协议端刷新过的地址（不会过期），再用消息里的原地址；去重、只留 http(s)。"""
+    out = []
+    for u in (fresh, url):
+        u = str(u or "").strip()
+        if u.lower().startswith(("http://", "https://")) and u not in out:
+            out.append(u)
+    return out
+
+
+async def fetch_image_bytes(bot, file_id: str, url: str, timeout: float = 12.0) -> bytes | None:
+    local, fresh = await lookup_image(bot, file_id)
+    if local:
+        # 读盘 + 校验放到线程里，不卡住事件循环（大图/机械硬盘时明显）
+        data = await asyncio.to_thread(_read_valid, local)
+        if data:
+            return data
+    for u in download_candidates(fresh, url):
+        try:
+            resp = await (await _get_client()).get(u, timeout=timeout)
+            if resp.status_code == 200 and await asyncio.to_thread(is_valid_image, resp.content):
+                return resp.content
+        except Exception as e:
+            logger.debug(f"[图片] 下载失败: {e}")
     return None
 
 

@@ -20,6 +20,37 @@ class BannedTest(unittest.TestCase):
         for s in ("这边我服务器卡了", "我服了你", "这衣服好看", "这个我服从安排", "服了"):
             self.assertEqual(banned.hit(s), "", s)
 
+    def test_comma_tail_variant(self):
+        for s in ("你们还认真讨论野史不野史，我服", "又迟到，我服了", "行吧，我是服了。", "我服"):
+            self.assertEqual(banned.hit(s), "…，我服", s)
+        for s in ("我服了你", "我服了你们", "服了", "我服务器炸了", "说完我服气了吗"):
+            self.assertEqual(banned.hit(s), "", s)
+        self.assertEqual(banned.strip("你们还认真讨论野史不野史，我服"), "你们还认真讨论野史不野史")
+
+    def test_send_guard_catches_every_path(self):
+        from nonebot.adapters.onebot.v11 import Message, MessageSegment
+        from nonebot.exception import MockApiException
+
+        new, changed, left = banned._clean_message("你们还认真讨论野史不野史，我服")
+        self.assertEqual((new, changed, left), ("你们还认真讨论野史不野史", True, True))
+        msg = Message([MessageSegment.at(123), MessageSegment.text(" 化学撕了生物倒是记得牢，这优先级我服")])
+        new, changed, left = banned._clean_message(msg)
+        self.assertTrue(changed and left)
+        self.assertNotIn("我服", str(new))
+        self.assertIn("记得牢", str(new))
+        new, changed, left = banned._clean_message([{"type": "text", "data": {"text": "这波我服了"}}])
+        self.assertEqual((changed, left), (True, False))
+        self.assertEqual(banned._clean_message("好耶")[1], False)
+        # 钩子本身：整条都是禁用句式就不发
+        from nonebot.adapters import Bot
+        hook = next(h for h in Bot._calling_api_hook if h.__name__ == "_banned_send_guard")
+        data = {"group_id": 1, "message": "这优先级我服"}
+        with self.assertRaises(MockApiException):
+            asyncio.run(hook(None, "send_group_msg", data))
+        data = {"group_id": 1, "message": "化学撕了，这优先级我服"}
+        asyncio.run(hook(None, "send_group_msg", data))
+        self.assertEqual(data["message"], "化学撕了")
+
     def test_strip_keeps_the_rest(self):
         self.assertEqual(banned.strip("化学撕了生物倒是记得牢，这优先级我服"), "化学撕了生物倒是记得牢")
         self.assertEqual(banned.strip("这波我服了"), "")

@@ -423,11 +423,41 @@ def snapshot(with_web: bool = True) -> dict:
         snap["features"] = local_features()
     except Exception as e:  # noqa: BLE001  数据库被占用等
         snap["errors"]["local"] = f"本地记账读不到：{e}"
+    try:
+        snap["board"] = board()
+    except Exception as e:  # noqa: BLE001
+        snap["errors"]["board"] = f"按群花费读不到：{e}"
     try:  # 留一份，下次打开页面先显示上次的
         db.put("panel", "llm_spend_last", {k: v for k, v in snap.items() if k in ("ts", "balance", "web")})
     except Exception:  # noqa: BLE001
         pass
     return snap
+
+
+def _group_names() -> dict:
+    try:
+        from furina.core import docfile
+
+        d = docfile.load("group_members.json")
+        return dict((d or {}).get("group_names") or {}) if isinstance(d, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def board(days: int = 7, rounds_limit: int = 80) -> dict:
+    """二代仿真花费看板：今天每个群、最近几天每个群、最近每一轮、积极性曲线（不联网）。"""
+    from furina.core import budget, rounds
+
+    names = _group_names()
+    rows = rounds.by_group(days)
+    today = date.today().isoformat()
+    for r in rows:
+        r["name"] = names.get(r["group"]) or (f"群 {r['group']}" if r["group"] else "（私聊 / 其他）")
+    recent = rounds.recent(limit=rounds_limit)
+    for r in recent:
+        r["name"] = names.get(r.get("g", "")) or f"群 {r.get('g', '')}"
+    return {"today": [r for r in rows if r["day"] == today], "days": rows, "recent": recent,
+            "hourly": rounds.hourly(), "budget": budget.status(), "curve": budget.curve()}
 
 
 def last_snapshot() -> dict:

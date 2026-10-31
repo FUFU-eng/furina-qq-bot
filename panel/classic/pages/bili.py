@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QScrollArea, QDialog, QMessageBox, QGridLayout
 
 from ..common import *  # noqa: F401,F403
 from ..widgets import *  # noqa: F401,F403
+from .bili_pics import BiliPicsMixin
 
 _STATE = {"idle": ("摸鱼中", "#8193b2"), "browsing": ("在找视频", "#6ad4ff"), "watching": ("正在看", "#3ecf8e"),
           "thinking": ("在回味", "#ffd166"), "acting": ("在动手", "#fb7299")}
@@ -107,13 +108,13 @@ def _livestream_html(ls):
             f"<span style='color:#6ad4ff'>{_E(ls.get('stage_url') or '')}</span>")
 
 
-class BiliPageMixin:
+class BiliPageMixin(BiliPicsMixin):
     def _build_bili_page(self):
         page = QWidget()
         page.setObjectName("stackPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 8)
+        layout.setSpacing(14)
 
         head = QHBoxLayout()
         self.bili_status = self._label("正在读取 B 站状态…", "pageSubLabel", 11)
@@ -144,6 +145,7 @@ class BiliPageMixin:
         row.addWidget(self.bili_pause_btn)
         layout.addWidget(bar)
 
+        layout.addWidget(self._build_bili_pics())
         self.bili_live = self._bili_box("此刻", min_h=86)
         layout.addWidget(self.bili_live[0])
         inner = QHBoxLayout()
@@ -153,24 +155,32 @@ class BiliPageMixin:
         inner.addWidget(self.bili_inner[0], 1)
         inner.addWidget(self.bili_taste[0], 1)
         layout.addLayout(inner)
+        stats_box = QFrame()
+        stats_box.setObjectName("contentSurface")
+        sl = QVBoxLayout(stats_box)
+        sl.setContentsMargins(16, 12, 16, 12)
+        sl.setSpacing(6)
+        sl.addWidget(self._label("今天做了多少", "sectionLabel", 12))
         self.bili_stats = QLabel()
         self.bili_stats.setTextFormat(Qt.RichText)
         self.bili_stats.setStyleSheet("background:transparent;")
-        layout.addWidget(self.bili_stats)
+        sl.addWidget(self.bili_stats)
+        layout.addWidget(stats_box)
 
         grid = QGridLayout()
         grid.setSpacing(12)
-        self.bili_feed = self._bili_box("最近的动静", scroll=True)
-        self.bili_watched = self._bili_box("看过的视频", scroll=True)
-        self.bili_posts = self._bili_box("发过的内容", scroll=True)
-        self.bili_learned = self._bili_box("在 B 站学到的梗", scroll=True)
+        self.bili_feed = self._bili_box("最近的动静")
+        self.bili_watched = self._bili_box("看过的视频")
+        self.bili_posts = self._bili_box("发过的内容")
+        self.bili_learned = self._bili_box("在 B 站学到的梗")
         grid.addWidget(self.bili_feed[0], 0, 0)
         grid.addWidget(self.bili_watched[0], 0, 1)
         grid.addWidget(self.bili_posts[0], 1, 0)
         grid.addWidget(self.bili_learned[0], 1, 1)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 1)
-        layout.addLayout(grid, 1)
+        layout.addLayout(grid)
+        layout.addStretch(1)
 
         self._bili_data = None
         self._bili_timer = QTimer(page)
@@ -183,8 +193,8 @@ class BiliPageMixin:
         frame = QFrame()
         frame.setObjectName("contentSurface")
         lay = QVBoxLayout(frame)
-        lay.setContentsMargins(14, 10, 14, 12)
-        lay.setSpacing(6)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
         lay.addWidget(self._label(title, "sectionLabel", 12))
         body = QLabel("…")
         body.setTextFormat(Qt.RichText)
@@ -192,7 +202,7 @@ class BiliPageMixin:
         body.setOpenExternalLinks(True)
         body.setTextInteractionFlags(Qt.TextBrowserInteraction)
         body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        body.setStyleSheet("background:transparent; color:#dbe4f3; font-size:12px;")
+        body.setStyleSheet("background:transparent; color:#d5deea; font-size:13px;")
         if min_h:
             body.setMinimumHeight(min_h)
         if scroll:
@@ -203,7 +213,7 @@ class BiliPageMixin:
             area.setWidget(body)
             lay.addWidget(area, 1)
         else:
-            lay.addWidget(body)
+            lay.addWidget(body, 1)  # 同一行两张卡片等高时，多出来的空间给正文，标题始终贴顶
         return frame, body
 
     # ---------------- 数据 ----------------
@@ -220,6 +230,7 @@ class BiliPageMixin:
             self.bili_status.setText(f"<span style='color:#ef4444'>读不到 B 站数据：{_E(str(e))[:120]}</span>")
             return
         self._bili_data = d
+        self._refresh_bili_pics(d.get("pics") or {})
         st = d.get("status") or {}
         now = d.get("now") or time.time()
         if not st.get("logged_in"):
@@ -270,16 +281,16 @@ class BiliPageMixin:
 
         t, c = st.get("today") or {}, d.get("caps") or {}
         cells = [
-            f"<td style='padding:6px 14px 6px 0'><span style='color:{col}'>●</span> 今天{label} "
+            f"<td style='padding:2px 26px 2px 0'><span style='color:{col}'>●</span> {label} "
             f"<b style='font-size:15px'>{int(t.get(k) or 0)}</b>"
             f"<span style='color:#8193b2'>{(' / ' + str(c[k])) if int(c.get(k) or 0) > 0 else ' · 不限'}</span></td>"
             for k, label, col in _STATS]
-        self.bili_stats.setText("<table><tr>" + "".join(cells[:3]) + "</tr><tr>" + "".join(cells[3:]) + "</tr></table>")
+        self.bili_stats.setText("<table><tr>" + "".join(cells) + "</tr></table>")
 
         feed = d.get("activity") or []
         self.bili_feed[1].setText("<br>".join(
             f"<span style='color:{_FEED_C.get(x.get('kind'), '#8193b2')}'>●</span> "
-            f"<span style='color:#8193b2'>{_hm(x.get('ts'))}</span>　{_E(str(x.get('text') or ''))}" for x in feed[:40])
+            f"<span style='color:#8193b2'>{_hm(x.get('ts'))}</span>　{_E(str(x.get('text') or ''))}" for x in feed[:15])
             or "<span style='color:#8193b2'>还没有动静</span>")
 
         watched = d.get("watched") or []
@@ -289,19 +300,19 @@ class BiliPageMixin:
             f"{(' · 兴趣 ' + str(x['interest'])) if x.get('interest') is not None else ''}</span>"
             f"{('<br>💭 ' + _E(str(x['thought']))) if x.get('thought') else ''}"
             f"{(ACTS_OPEN + _E('、'.join(map(str, x['acts']))) + '</span>') if x.get('acts') else ''}"
-            for x in watched[:30]) or "<span style='color:#8193b2'>还没看过视频</span>")
+            for x in watched[:8]) or "<span style='color:#8193b2'>还没看过视频</span>")
 
         posts = d.get("posts") or []
         self.bili_posts[1].setText("<br><br>".join(
             f"<span style='color:#ffd166'>[{_POST_KIND.get(p.get('kind'), _E(str(p.get('kind') or '')))}]</span> "
             f"<span style='color:#8193b2'>{_hm(p.get('ts'))}</span>　"
             + (f"<a style='color:#dbe4f3' href='{_E(p['url'])}'>{_E(str(p.get('text') or ''))}</a>" if p.get("url") else _E(str(p.get("text") or "")))
-            for p in posts[:40]) or "<span style='color:#8193b2'>还没发过东西</span>")
+            for p in posts[:10]) or "<span style='color:#8193b2'>还没发过东西</span>")
 
         learned = d.get("learned") or []
         trend = (d.get("trending") or {}).get("words") or []
         txt = "<br>".join(f"<b>{_E(str(x.get('term') or ''))}</b>　<span style='color:#8193b2'>{_E(str(x.get('meaning') or ''))}</span>"
-                          for x in learned[:60]) or "<span style='color:#8193b2'>还没学到新梗</span>"
+                          for x in learned[:20]) or "<span style='color:#8193b2'>还没学到新梗</span>"
         if trend:
             txt += "<br><br><span style='color:#fb7299'>B站热词：</span>" + _E("、".join(map(str, trend[:20])))
         self.bili_learned[1].setText(txt)

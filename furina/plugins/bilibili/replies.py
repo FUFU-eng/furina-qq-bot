@@ -144,7 +144,7 @@ REPLY_PROMPT = """你在 B 站评论区说过话，现在有人回你了。下�
 """
 
 PARTNER_RULE = """
-- 标着【主人】的是你主人（B 站昵称：{name}）。在 B 站上你和他最亲：对他亲昵、会撒娇、也会小傲娇地怼他，叫他「主人」。
+- 标着【主人】的是你主人（B 站昵称：{name}）。在 B 站上你就是他老婆：对他亲昵、会撒娇、也会小傲娇地怼他，叫他「主人」（不是主人）。
 - at_partner：只有你真想把主人叫过来的时候才写 true —— 比如有人跟你聊得很开心想炫耀、有人夸你、有人杠你想让主人撑腰、
   或者这段对话主人一定想看。true 时系统会在你回复前面艾特主人，所以 reply 要写成同时也是说给主人听的，
   比如「主人快来，有人跟我说话了[星星眼]」「主人你看他欺负我[大哭]」。大多数时候是 false；回主人本人时也别写 true。
@@ -331,3 +331,123 @@ async def _act(cli: Client, c: dict, s: dict, decided: list[dict], ids: dict, al
         logger.info(f"[B站] 回复 {who}：{msg}")
         done += 1
     return done
+
+
+# ---------------- B站私信双向互动（参考 dsh-bili-scroll 2.0：平时零 token，有新消息/分享视频才看并回） ----------------
+DM_REPLY_PROMPT = """你登录着自己的 B 站小号，看到你最亲近的人（{partner_name}，也就是你的主人/主人）在 B 站私信里给你发了新消息！
+
+你们最近的私信对话：
+{history}
+{video_block}
+请用芙宁娜的口吻在 B 站私信里回他一句（10~80 字）：
+- 如果他给你分享了视频，我已经把视频的字幕、3×3 画面分镜和弹幕热评都看完了（见上方「他分享给你的视频详情」），你要针对视频里的具体画面、内容或槽点跟他聊，表现出你真的认真点开看完了，别说空话套话；
+- 平时说话自然、口语、亲昵里带一点小傲娇或小得意；
+- 只输出你要发给他的私信正文，不要加引号、不要加任何前缀。"""
+
+
+async def check_owner_dm(notify=None) -> str:
+    """只读轮询主人（BILI_PARTNER_MID）的 B 站私信：无新消息时 0 token；有新消息或视频分享时先看视频再回私信。"""
+    c = cfg()
+    partner_mid = str(c.get("partner_mid") or "").strip()
+    if not (c.get("on", True) and partner_mid and store.logged_in()) or store.halted()[0]:
+        return ""
+    now = time.time()
+    try:
+        async with Client() as cli:
+            await cli.ensure_buvid()
+            msgs = await cli.dm_messages(partner_mid, size=8)
+            if not msgs:
+                return ""
+            raw_seen = store.get_meta("dm_seen")
+            first_init = raw_seen is None
+            seen_keys = set(raw_seen or [])
+            all_keys = [m["key"] for m in msgs if m.get("key")]
+            if first_init:
+                # 首次初始化：超过 10 分钟的历史老私信直接标已读，避免突然翻旧账
+                old_keys = [m["key"] for m in msgs if m.get("key") and (m.get("from_me") or now - float(m.get("ts") or 0) > 600)]
+                seen_keys.update(old_keys)
+                store.set_meta("dm_seen", list(seen_keys)[-200:])
+
+            unread = [
+                m for m in msgs
+                if m.get("key") and m["key"] not in seen_keys and not m.get("from_me")
+                and (now - float(m.get("ts") or 0) <= 48 * 3600)
+            ]
+            if not unread:
+                return ""
+
+            # 立刻标为已读，防止重入重复回
+            seen_keys.update(all_keys)
+            store.set_meta("dm_seen", list(seen_keys)[-200:])
+
+            partner_name, _ = await _partner(cli, c)
+            partner_label = partner_name or "主人"
+            latest = unread[-1]
+
+            # 检查私信里有没有分享视频（支持 msg_type=7/8 分享卡片、BV号、b23.tv短链）
+            bvid = ""
+            for m in reversed(unread):
+                if m.get("bvid"):
+                    bvid = m["bvid"]
+                    break
+                resolved = await cli.resolve_bvid(m.get("text") or "")
+                if resolved:
+                    bvid = resolved
+                    break
+
+            video_block = ""
+            if bvid:
+                store.set_live("watching", {"bvid": bvid, "title": bvid}, "看主人私信分享的视频")
+                try:
+                    from ...services.bilibili import storyboard
+                    vd = await storyboard.watch_video_detail(bvid, with_vision=True, record_watched=True)
+                    if vd.get("ok"):
+                        video_block = (
+                            f"\n【他分享给你的视频详情（你已经点开看完了）】\n"
+                            f"- 标题：《{vd['title']}》（UP主：{vd.get('up', '')}，时长：{vd.get('duration', '')}）\n"
+                            f"- 简介：{vd.get('desc', '')}\n"
+                            f"- 字幕内容：{vd.get('subtitle', '')[:600]}\n"
+                            f"- 3×3画面分镜：{vd.get('storyboard_scenes', '')}\n"
+                            f"- 弹幕与热评：{' / '.join(vd.get('danmaku', [])[:10])} | {' / '.join(vd.get('hot_comments', [])[:4])}\n"
+                        )
+                        surf._log(f"看了{partner_label}私信分享的《{vd['title'][:24]}》", "watch", bvid=bvid)
+                except Exception as e:
+                    logger.warning(f"[B站私信] 看分享视频 {bvid} 失败: {e}")
+
+            hist_lines = []
+            for m in msgs[-6:]:
+                who = "你" if m.get("from_me") else partner_label
+                hist_lines.append(f"- {who}：{m.get('text', '')}")
+
+            prompt = DM_REPLY_PROMPT.format(
+                partner_name=partner_label,
+                history="\n".join(hist_lines),
+                video_block=video_block,
+            )
+            reply_raw = await surf._llm(surf._persona(), prompt, max_tokens=240)
+            reply_text = surf.clean_line(reply_raw, 120)
+            if not reply_text:
+                return ""
+            if c.get("dry_run"):
+                surf._log(f"（演练）想回{partner_label}的B站私信：{reply_text}", "reply", bvid=bvid)
+                return f"（演练）回私信：{reply_text}"
+
+            await surf._pause((2, 6), (0.5, 1.5), False)
+            await cli.send_dm(partner_mid, reply_text)
+            store.bump("replies")
+            store.add_post("dm", reply_text, to=partner_label, their=latest.get("text", "")[:80], bvid=bvid)
+            surf._log(f"在B站私信回了{partner_label}：「{reply_text}」（原话：{latest.get('text', '')[:30]}）", "reply", bvid=bvid)
+            logger.info(f"[B站私信] 已回 {partner_label}({partner_mid})：{reply_text}")
+            return f"回了{partner_label}的私信：{reply_text}"
+    except RiskControl as e:
+        store.halt(f"私信触发风控 {e.code}", surf.cfg()["pause_hours"])
+        return ""
+    except NotLoggedIn:
+        store.update_auth(invalid=True)
+        return ""
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[B站私信] 检查私信未成功: {e}")
+        return ""
+    finally:
+        store.set_live("idle")
+

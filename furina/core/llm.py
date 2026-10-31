@@ -224,7 +224,8 @@ THINK_MARK = "#思考"
 
 
 def _record_tokens(model: str, usage: dict, effort: str | None = None, tag: str | None = None,
-                   free: bool = False) -> None:
+                   free: bool = False, price: tuple[float, float, float] | None = None) -> dict:
+    """记一次调用的账；返回 {hit, miss, out, cost}（cost 单位元，记账失败返回空 dict）。"""
     try:
         prompt = int(usage.get("prompt_tokens") or 0)
         hit = int(usage.get("prompt_cache_hit_tokens") or 0)
@@ -232,8 +233,8 @@ def _record_tokens(model: str, usage: dict, effort: str | None = None, tag: str 
         out = int(usage.get("completion_tokens") or 0)
         think = int(usage.get("reasoning_tokens") or (usage.get("completion_tokens_details") or {}).get("reasoning_tokens") or 0)
         if not (prompt or out):
-            return
-        ph, pm, po = prices()
+            return {}
+        ph, pm, po = price if price is not None else prices()
         cost = 0.0 if free else (hit * ph + miss * pm + out * po) / 1e6
         tag = tag or caller_tag()
         if effort in ("low", "high", "max"):
@@ -248,13 +249,16 @@ def _record_tokens(model: str, usage: dict, effort: str | None = None, tag: str 
             db.usage_add(day, "llmfree:calls", tag, "", 1)
         logger.info(f"[用量] {tag} 输入{prompt}（命中{hit}）输出{out}" + (f"（思考{think}）" if think else "")
                     + (f" 免费（{model}）" if free else f" ≈{cost * 100:.3f}分"))
+        return {"hit": hit, "miss": miss, "out": out, "cost": cost}
     except Exception as e:  # noqa: BLE001  记账失败不影响调用
         logger.debug(f"[用量] 记账失败: {e}")
+        return {}
 
 
-def record_usage(usage: dict, tag: str, effort: str | None = None, model: str = "") -> None:
-    """外部内核（DSH）的一次模型请求也记进同一本账。"""
-    _record_tokens(model or DEFAULT_MODEL, usage or {}, effort=effort, tag=tag)
+def record_usage(usage: dict, tag: str, effort: str | None = None, model: str = "",
+                 price: tuple[float, float, float] | None = None) -> dict:
+    """外部内核（DSH）的一次模型请求也记进同一本账。price = 外接模型自己的（命中, 未命中, 输出）元/百万 token。"""
+    return _record_tokens(model or DEFAULT_MODEL, usage or {}, effort=effort, tag=tag, price=price)
 
 
 def usage_report(day: str | None = None) -> list[dict]:
@@ -334,7 +338,14 @@ async def chat(messages: list[dict], timeout: float | None = None, max_tokens: i
                     errors.append(f"{model}: {e}")
                     _record_failure(model, multi, e)
                     break
-    raise LLMError("模型池全部不可用: " + " | ".join(errors[-5:]) if errors else "模型池全部处于冷却中")
+    err_msg = "模型池全部不可用: " + " | ".join(errors[-5:]) if errors else "模型池全部处于冷却中"
+    try:
+        from ..plugins.chat import fun_features
+        if fun_features.is_balance_error(err_msg):
+            asyncio.create_task(fun_features.maybe_alert_low_balance(err_msg))
+    except Exception:  # noqa: BLE001
+        pass
+    raise LLMError(err_msg)
 
 
 async def _try_free(messages: list, *, timeout: float, max_tokens: int, temp: float | None,
@@ -383,7 +394,7 @@ async def _try_free(messages: list, *, timeout: float, max_tokens: int, temp: fl
 
 
 async def describe_image(data_url: str, max_len: int = 40, prompt: str = "") -> str:
-    """一句话图片描述（存进上下文，方便以后提到这张图）。失败返回空串。prompt 可换成别的看图要求（如给表情包写备注）。"""
+    """一句话图片描述（存进上下文，方便以后提到这张图）。失败返回空串。prompt 可换成别的看图要求（如给表情包写备注、看视频九宫格分镜）。"""
     if not data_url or not api_key() or not endpoint():
         return ""
     messages = [{
@@ -393,9 +404,10 @@ async def describe_image(data_url: str, max_len: int = 40, prompt: str = "") -> 
             {"type": "text", "text": prompt or "用一句话简短描述这张图片的内容和文字（如果有），30 字以内，直接输出描述本身，不要任何前缀或标点符号"},
         ],
     }]
+    tokens = max(256, min(1024, max_len * 2))
     async with _vision_semaphore:
         try:
-            text = await chat(messages, timeout=30, max_tokens=256)
+            text = await chat(messages, timeout=40 if max_len > 100 else 30, max_tokens=tokens)
         except LLMError as e:
             logger.warning(f"[LLM] 图片描述失败: {e}")
             return ""

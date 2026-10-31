@@ -167,12 +167,22 @@ HUOREN = [
      "被@/叫到、而前面这么多分钟群里没人说话时，跳过「先理一下对话关系」那次模型调用，直接回。0 = 每次都先理。", _o(min=0, max=120, suffix="分钟")),
     ("AI_CHAT_PROMPT_SIZE_LOG", "日志里记提示词各段长度", "bool", True,
      "每次回复在日志写一行「[提示词] 人设 / 记录 / 本轮提示 多少字」，配合「[用量]」行看钱花在哪。", {}),
+    ("AI_CHAT_PEEK_DESKTOP_ENABLED", "允许查岗主人电脑桌面", "bool", True,
+     "群友起哄查岗或芙芙自己好奇时，静默查看你当前打开的窗口/游戏并截一张桌面发到群里吐槽（遇到密码、登录、环境变量窗口自动跳过截图）。", {}),
+    ("AI_CHAT_BALANCE_ALERT_ENABLED", "余额真没了自动截图喊主人", "bool", True,
+     "当接口真的返回 402 余额不足时，自动截一张 DeepSeek 充值页图发到群里并 @主人 撒娇喊你救命（6 小时冷却防刷屏）。", {}),
+    ("AI_CHAT_BLACK_BOOK_ENABLED", "抖S「记小本本」与群友绰号", "bool", True,
+     "群友顶嘴、开黄腔被反杀或出糗时，芙芙会给 TA 起个好笑的外号记在小本本上，以后随时翻旧账嘲笑（可在「角色管理」页查看与增删）。", {}),
 ]
 
 VOICE = [
     ("AI_CHAT_VOICE", "语音总开关", "bool", True, "关掉后所有群都只发文字。各群还要在「功能权限」里打开「语音消息」（默认开）。", {}),
     ("AI_CHAT_VOICE_PROBABILITY", "短句随机用语音", "pct", 0.08,
      "引擎开着时，普通短回复改用语音的概率；群友点名要听、她自己想用语音时不受这个限制。", {}),
+    ("AI_CHAT_VOICE_BOOST_ENABLED", "高傲语音反击 / 撒娇加成", "bool", True,
+     "当芙芙打出「哼、杂鱼、就这、才没有、小蛋糕、充钱」等抖S反杀或傲娇撒娇名台词时，自动提高发语音概率并自动唤醒语音引擎。", {}),
+    ("AI_CHAT_VOICE_BOOST_PROB", "触发高傲反击时的语音概率", "pct", 0.45,
+     "命中抖S反杀或撒娇台词时的语音触发概率（默认 45%）。", {}),
     ("AI_CHAT_VOICE_MAX_CHARS", "最长念多少字", "int", 40, "超过就发文字；群友点名要听时放宽一倍。", _o(min=10, max=200, suffix="字")),
     ("AI_CHAT_VOICE_HOURLY_MAX", "每群每小时最多", "int", 0, "0 = 不限条数。", _o(min=0, max=600, suffix="条")),
     ("FURINA_TTS_ENABLED", "启用语音引擎", "bool", False, "配好下面的引擎目录、权重和参考音频后打开。", {}),
@@ -234,6 +244,10 @@ WEBSEARCH = [
 ]
 
 BILI = [
+    ("BILI_PICS_ENABLED", "画师UP新图订阅", "bool", True,
+     "全群共用UP名单，只推新图片和UP名；不依赖自动刷视频，不调用聊天模型。名单在「B站生活 → 管理UP名单」里管理。", {}),
+    ("BILI_PICS_INTERVAL_MINUTES", "UP动态检查间隔", "int", 20,
+     "首次订阅不补旧图，后续分批检查；UP较多时会排队。各群可在功能权限里独立关接收。", _o(min=5, max=1440, suffix="分钟")),
     ("BILI_ENABLED", "自动刷 B 站", "bool", True, "关掉后不再定时刷（面板按钮和指令照样能用）。", {}),
     ("BILI_DRY_RUN", "演练模式", "bool", False, "只看不发：点赞、弹幕、评论、动态只记在动态流里，不真发。", {}),
     ("BILI_HOURS", "刷 B 站的时段", "text", "10-24", "格式：开始点-结束点，如 10-24、22-2。", {}),
@@ -368,13 +382,15 @@ SECTIONS = {
             "AI_CHAT_MOOD_TELL_PER_DAY", "AI_CHAT_MOOD_JUDGE_DAILY_MAX")),
         ("主动搭话的骰子", "参考 dsh-speak-up：找你、惦记人时本地掷骰子，没中有加成；高峰少开口（冷场冒泡、刷 B 站也乘高峰倍率，但不吃加成）。", (
             "AI_CHAT_PROACTIVE_PITY", "AI_CHAT_PROACTIVE_PITY_CAP", "AI_CHAT_PEAK_FACTOR")),
+        ("查岗主人 · 抖S小本本 · 余额救急", "芙芙专属互动特权：查岗桌面、给群友记小本本起绰号、真没钱时自动截图喊你。", (
+            "AI_CHAT_PEEK_DESKTOP_ENABLED", "AI_CHAT_BLACK_BOOK_ENABLED", "AI_CHAT_BALANCE_ALERT_ENABLED")),
         ("主动来找你", "", ("AI_CHAT_OWNER_SEEK", "AI_CHAT_OWNER_SEEK_DAILY_MAX")),
         ("听懂语音", "借语音引擎目录里的 FunASR。", ("AI_CHAT_HEAR_VOICE", "AI_CHAT_HEAR_VOICE_DAILY_MAX", "AI_CHAT_HEAR_VOICE_MIN_RAM_GB")),
         ("省钱", "每次调用花多少记在日志「[用量]」行；心情判断、B站观后感、随机接话也都花钱，可在各自卡片里关。", (
             "AI_CHAT_UPKEEP", "AI_CHAT_PLANNER_QUIET_SKIP_MIN", "AI_CHAT_PROMPT_SIZE_LOG")),
     ],
     "voice": [
-        ("什么时候发语音", "", ("AI_CHAT_VOICE", "AI_CHAT_VOICE_PROBABILITY", "AI_CHAT_VOICE_MAX_CHARS", "AI_CHAT_VOICE_HOURLY_MAX")),
+        ("什么时候发语音", "", ("AI_CHAT_VOICE", "AI_CHAT_VOICE_PROBABILITY", "AI_CHAT_VOICE_BOOST_ENABLED", "AI_CHAT_VOICE_BOOST_PROB", "AI_CHAT_VOICE_MAX_CHARS", "AI_CHAT_VOICE_HOURLY_MAX")),
         ("引擎与模型", "本机 GPT-SoVITS 整合包。", ("FURINA_TTS_ENABLED", "FURINA_TTS_ENGINE_DIR", "FURINA_TTS_GPT", "FURINA_TTS_SOVITS",
                                               "FURINA_TTS_PORT", "FURINA_TTS_SAMPLE_STEPS")),
         ("音质", "吞尾字、气声重时调这里。", ("FURINA_TTS_SOFTEN", "FURINA_TTS_TAIL_PAD_MS")),
@@ -387,6 +403,8 @@ SECTIONS = {
           "FURINA_TTS_MIN_FREE_COMMIT_GB", "FURINA_TTS_MIN_FREE_VRAM_GB", "FURINA_TTS_IDLE_MINUTES")),
     ],
     "bili": [
+        ("画师图片订阅", "一份全群共用名单，普通检查和推图不调用模型；不依赖自动刷视频开关。", (
+            "BILI_PICS_ENABLED", "BILI_PICS_INTERVAL_MINUTES")),
         ("刷视频", "没字幕（听不到内容）的视频优先换掉，实在要看也只点赞、不评论不发弹幕。", (
             "BILI_ENABLED", "BILI_DRY_RUN", "BILI_HOURS", "BILI_ROUNDS_DAILY", "BILI_ROUND_GAP_MINUTES",
             "BILI_VIDEOS_PER_ROUND", "BILI_WATCH_REPORT", "BILI_MIN_VIEWS", "BILI_MIN_AGE_HOURS", "BILI_INTERESTS", "BILI_ROAM_TAGS",

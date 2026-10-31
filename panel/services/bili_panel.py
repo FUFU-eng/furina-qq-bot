@@ -13,7 +13,7 @@ import time
 
 from furina.core import db
 from furina.services import annoy, slang
-from furina.services.bilibili import store, taste
+from furina.services.bilibili import pictures, store, taste
 from furina.services.bilibili.client import Client
 
 from . import envfile
@@ -80,6 +80,7 @@ def overview() -> dict:
         "taste": _safe(taste.snapshot, {}),
         "inner": inner_state(),
         "livestream": _safe(lambda: livestream(env), {}),
+        "pics": pictures.snapshot(),
         "now": time.time(),
     }
 

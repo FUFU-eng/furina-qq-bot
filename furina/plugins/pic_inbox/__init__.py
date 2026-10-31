@@ -183,7 +183,7 @@ async def _loop() -> None:
     await asyncio.sleep(15)
     # 上次机器人被杀时可能停在「强化中」：退回排队
     await asyncio.to_thread(svc.reset_running)
-    last_tunnel = 0.0
+    _spawn(_tunnel_loop())
     while True:
         try:
             if svc.enabled():
@@ -191,12 +191,20 @@ async def _loop() -> None:
                 await asyncio.to_thread(svc.purge)
                 if svc.enhance_under_bytes():
                     await _enhance_one()
-                if time.time() - last_tunnel > 300:
-                    last_tunnel = time.time()
-                    _state["tunnel"] = await _tunnel().ensure()
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[筛图] 后台任务出错: {e}")
         await asyncio.sleep(20)
+
+
+async def _tunnel_loop() -> None:
+    """隧道看门狗单独跑：以前和强化挤在一个循环里，强化一张大图时好久才轮到检查隧道。"""
+    while True:
+        try:
+            if svc.enabled():
+                _state["tunnel"] = await _tunnel().ensure()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[筛图] 隧道检查出错: {e}")
+        await asyncio.sleep(300)
 
 
 def _tunnel():

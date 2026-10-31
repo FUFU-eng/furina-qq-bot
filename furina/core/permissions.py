@@ -21,9 +21,12 @@ FEATURES: dict[str, str] = {
     "proactive":     "冷场主动开话题",
     "voice":         "语音消息",
     "bili_share":    "B站刷到分享",
+    "bili_pics":     "B站画师图片",
     "websearch":     "联网搜索",
     "miss":          "惦记常聊的人",
     "pic_inbox":     "收图筛选",
+    "memewiki":      "查梗",
+    "maker":         "认真做文件",
 }
 
 # 新入群的默认开关：米游社推送、Pixiv 榜单、定时提醒、冷场主动开话题需显式开启；
@@ -31,6 +34,8 @@ FEATURES: dict[str, str] = {
 # 语音消息默认开（还要 .env 配好 FURINA_TTS_*）；B站刷到分享默认关，按群手动打开。
 # 惦记常聊的人默认开（常找她聊的人好久没出现，她会艾特 TA 随口说一两句）。
 # 收图筛选默认关：只在想收图的群里打开（群友发的图会进筛图库，等人工留下/丢掉）。
+# 认真做文件默认开（攻略、清单这类写成文件发群文件）。
+# B站画师图片默认开：所有群共用UP名单，每群可独立关接收；初始名单为空，不会凭空推图。
 DEFAULT_ON_FEATURES = frozenset(FEATURES) - {"miyoushe", "pixiv_rank", "pixiv_id", "reminder", "proactive", "pic_inbox"}
 
 

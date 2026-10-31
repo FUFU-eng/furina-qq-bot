@@ -109,6 +109,12 @@ def auto_at_level() -> str:
     return lv if lv in EFFORTS else "low"
 
 
+def auto_follow_level() -> str:
+    """自动档下「她刚说完有人接话」时想多深（默认低：先看清是不是在接她的话）。"""
+    lv = parse_effort(env.get("AI_CHAT_THINKING_AUTO_FOLLOW", "低"), "low")
+    return lv if lv in EFFORTS else "low"
+
+
 _QUESTION = re.compile(r"[?？]|怎么|为什么|为啥|是不是|能不能|可不可以|会不会|多少|哪[个里些儿]|什么|啥|吗|呢\s*$|帮我|查一?下|搜一?下|解释|分析|推荐|对比|区别|算一?下")
 
 
@@ -120,7 +126,7 @@ def looks_like_question(text: str) -> bool:
 def effort_for(group_id=None, kind: str = "random", text: str = "") -> str:
     """这一轮用多大的思考强度：off / low / high / max。
 
-    kind：random（随机插话 / 醒来看看）、proactive（主动冒泡）、at（被艾特 / 叫到 / 引用）、
+    kind：random（随机插话 / 醒来看看）、follow（刚说完有人接话）、proactive（主动冒泡）、at（被艾特 / 叫到 / 引用）、
     search（查资料之后）、tool（用工具之后）、private（主人私聊 / Agent）。
     自动档：随机插话和主动冒泡不思考；被问问题、查资料、用工具时用「自动档思考强度」；
     被叫到但不像提问时用「被叫到也想一下」的档位（默认低）。
@@ -132,6 +138,8 @@ def effort_for(group_id=None, kind: str = "random", text: str = "") -> str:
         return auto_level()
     if kind == "at":
         return auto_level() if looks_like_question(text) else auto_at_level()
+    if kind == "follow":
+        return auto_follow_level()
     return "off"
 
 
@@ -242,9 +250,24 @@ def dsh_settings() -> dict:
         "agent_timeout": max(30, min(1800, env.get_int("AI_CHAT_AGENT_TIMEOUT", 600))),
         # 群会话的上下文上限（千 token）：DSH 自带的压缩要到模型窗口的 80% 才动手（DeepSeek 是 1M 窗口 ≈ 80 万），
         # 每次醒来都把十几万字的旧聊天重发一遍，钱全花在这。超过就换新会话，带上最近几十条聊天接着聊。0 = 不限。
-        "context_max_k": max(0, min(900, env.get_int("AI_CHAT_DSH_CONTEXT_MAX_K", 60))),
+        # 2026-10-30 起默认 30k：60k 时平均每次请求带 3.4 万 token，命中缓存也是一大笔；30k 换会话更勤但每次都轻
+        "context_max_k": max(0, min(900, env.get_int("AI_CHAT_DSH_CONTEXT_MAX_K", 30))),
         "recap_lines": max(5, min(120, env.get_int("AI_CHAT_DSH_RECAP_LINES", 30))),
+        # qq_say 发出去 / qq_silence 之后直接结束这一轮：省掉模型最后那次「好，结束」的请求（每次都要重发整段上下文）
+        "end_after_say": env.get_bool("AI_CHAT_DSH_END_AFTER_SAY", True),
+        # 每轮「你现在的状态」最多多少字；同一个会话里已经给过的段落不再重发（会话里本来就有）
+        "dynamic_max": max(0, min(6000, env.get_int("AI_CHAT_SIM2_DYNAMIC_MAX", 1500))),
     }
+
+
+def follow_gate() -> bool:
+    """接话醒来前先用免费模型（或本地规则）判断新消息是不是在接她的话，不是就不叫醒主模型。"""
+    return env.get_bool("AI_CHAT_WAKE_FOLLOW_GATE", True)
+
+
+def peak_wake_factor() -> float:
+    """高峰时段（价格翻倍）接话 / 潜水醒来的概率乘这个数（1 = 不减）。"""
+    return max(0.0, min(1.0, env.get_float("AI_CHAT_WAKE_PEAK_FACTOR", 0.6)))
 
 
 # ---------------- 表情包本子 ----------------

@@ -1,51 +1,59 @@
-"""经典面板统一配色与通用样式片段。
+"""经典面板统一配色与通用样式片段（2026-10 重做）。
 
-以前颜色散落在几十处 setStyleSheet 字符串里（同一种“正文灰”有 5 种写法）；
-新代码和改动请只从这里取颜色/样式，保证各页面观感一致。
+设计约定（新代码和改动请只从这里取颜色/样式）：
+- 功能页一律实色底，不再把壁纸垫在内容下面；壁纸只留在主页。
+- 三层表面：APP_BG（页面底）< SURFACE（卡片）< SURFACE_RAISED（按钮/悬停）；输入框用更深的 SURFACE_DEEP。
+- 只有一个强调色 ACCENT（青蓝）；状态色只用 STATUS_OK / STATUS_WARN / STATUS_BAD。
+- 字号：页标题 20、卡片标题 14、正文 13、说明 12；圆角：卡片 12、控件 8。
 """
 
 # ---- 基础色（原 window.py 常量，名字不变）----
-COLOR_BG = "#0a0f2d"
-COLOR_PANEL = "#0d1526"
-COLOR_TEXT = "#f4f7ff"
-COLOR_MUTED = "#8a94a6"
+COLOR_BG = "#0b1220"
+COLOR_PANEL = "#0d1524"
+COLOR_TEXT = "#e8eef7"
+COLOR_MUTED = "#94a3b8"
 COLOR_GOLD = "#ffd166"
 COLOR_BLUE = "#6ad4ff"
-COLOR_GREEN = "#3ecf8e"
-COLOR_RED = "#e5484d"
-COLOR_BTN = "#1e2540"
-COLOR_BTN_TEXT = "#e2e8f0"
+COLOR_GREEN = "#34d399"
+COLOR_RED = "#f87171"
+COLOR_BTN = "#1a2539"
+COLOR_BTN_TEXT = "#dbe4f0"
 
-# ---- 语义色（与全局样式表 _qss 保持一致）----
-SURFACE = "#172337"          # 卡片/分组底色
-SURFACE_DEEP = "#0d1726"     # 输入框、日志区
-SURFACE_HOVER = "#1b2a41"    # 列表项/行悬停
-SURFACE_SELECTED = "#223957"
-BORDER = "rgba(255,255,255,0.08)"
-BORDER_STRONG = "rgba(255,255,255,0.16)"
-BORDER_ACCENT = "rgba(106,212,255,0.45)"
+# ---- 语义色 ----
+APP_BG = "#0d1524"            # 功能页底色
+RAIL_BG = "#0a101c"           # 左侧导航
+SURFACE = "#141e30"           # 卡片/分组底色
+SURFACE_DEEP = "#0a1120"      # 输入框、日志区
+SURFACE_RAISED = "#1a2539"    # 按钮
+SURFACE_HOVER = "#1e2b42"     # 列表项/行悬停
+SURFACE_SELECTED = "#1f3550"
+BORDER = "rgba(255,255,255,0.07)"
+BORDER_STRONG = "rgba(255,255,255,0.13)"
+BORDER_ACCENT = "rgba(106,212,255,0.55)"
+ACCENT = "#6ad4ff"
+ACCENT_SOFT = "rgba(106,212,255,0.14)"
 TEXT_PRIMARY = "#f1f5f9"
-TEXT_BODY = "#dbe6f5"
-TEXT_SECONDARY = "#9aabc4"
-TEXT_HINT = "#6f819c"
-STATUS_OK = "#10b981"
-STATUS_WARN = "#f59e0b"
-STATUS_BAD = "#ef4444"
+TEXT_BODY = "#d5deea"
+TEXT_SECONDARY = "#94a3b8"
+TEXT_HINT = "#748299"
+STATUS_OK = "#34d399"
+STATUS_WARN = "#fbbf24"
+STATUS_BAD = "#f87171"
 
-RADIUS_CARD = 14
-RADIUS_CONTROL = 9
+RADIUS_CARD = 12
+RADIUS_CONTROL = 8
 
 # ---- 通用样式片段 ----
 LINE_EDIT_QSS = (
-    f"QLineEdit {{ background: {SURFACE_DEEP}; color: {COLOR_TEXT}; border: 1px solid rgba(255,255,255,0.12);"
-    f" border-radius: {RADIUS_CONTROL}px; padding: 8px 10px; font-size: 13px; }}"
-    f"QLineEdit:focus {{ border-color: rgba(106,212,255,0.60); }}"
+    f"QLineEdit {{ background: {SURFACE_DEEP}; color: {COLOR_TEXT}; border: 1px solid {BORDER_STRONG};"
+    f" border-radius: {RADIUS_CONTROL}px; padding: 7px 10px; font-size: 13px; }}"
+    f"QLineEdit:focus {{ border-color: {BORDER_ACCENT}; }}"
 )
 MINI_BUTTON_QSS = (
-    f"QPushButton {{ background: {SURFACE_HOVER}; color: {TEXT_BODY}; border: 1px solid {BORDER};"
-    f" border-radius: 8px; padding: 4px 10px; font-size: 12px; }}"
-    f"QPushButton:hover {{ background: #263957; border-color: rgba(106,212,255,0.42); color: #ffffff; }}"
-    f"QPushButton:pressed {{ background: #31486b; }}"
+    f"QPushButton {{ background: {SURFACE_RAISED}; color: {TEXT_BODY}; border: 1px solid {BORDER};"
+    f" border-radius: {RADIUS_CONTROL}px; padding: 4px 10px; font-size: 12px; }}"
+    f"QPushButton:hover {{ background: {SURFACE_HOVER}; border-color: {BORDER_STRONG}; color: #ffffff; }}"
+    f"QPushButton:pressed {{ background: {SURFACE_SELECTED}; }}"
 )
 
 

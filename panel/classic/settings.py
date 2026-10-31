@@ -23,7 +23,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QFont, QKeySequence, QPainter, QPainterPath, QPalette, QPen, QPixmap, QShortcut
 from PySide6.QtWidgets import (
-    QAbstractItemView, QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QDialog, QFrame, QGridLayout,
     QHBoxLayout, QLabel, QLayout, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
     QPushButton, QScrollArea, QSizePolicy, QSpinBox, QStackedWidget, QTimeEdit, QVBoxLayout,
     QWidget,
@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 # ---------------------------------------------------------------- 视觉规范
 GOLD = "#ffd166"
+ACCENT = "#6ad4ff"  # 设置窗口统一用主界面同一个青色强调色（原来是金色）
 CYAN = "#6ad4ff"
 GREEN = "#3ecf8e"
 RED = "#ff6b6b"
@@ -41,34 +42,41 @@ FONT_STACK = '"Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", "Noto Sans
 MONO_STACK = '"Cascadia Mono", Consolas, "Noto Sans Mono CJK SC", monospace'
 
 _STYLE_TEMPLATE = """
-QDialog#settingsCenter {{ background: #0f172a; }}
-QWidget {{ font-family: @FONT@; font-size: 13px; color: #e8eef8; }}
-QWidget#sidebar {{ background: #0b1222; border-right: 1px solid rgba(255,255,255,0.06); }}
-QWidget#content, QWidget#pageBody, QStackedWidget#pageStack, QStackedWidget#subStack {{ background: transparent; }}
+QDialog#settingsCenter {{ background: #0d1524; }}
+QWidget {{ font-family: @FONT@; font-size: 13px; color: #e2e8f0; }}
+QWidget#sidebar {{ background: #0a101c; border-right: 1px solid rgba(255,255,255,0.06); }}
+QWidget#content, QWidget#pageBody, QWidget#pageHolder, QStackedWidget#pageStack, QStackedWidget#subStack {{ background: transparent; }}
 QLabel {{ background: transparent; }}
-QLabel#brandTitle {{ font-size: 19px; font-weight: 700; color: #f8fafc; }}
-QLabel#brandSub {{ font-size: 12px; color: #6f809c; }}
+QLabel#brandTitle {{ font-size: 18px; font-weight: 700; color: #f1f5f9; }}
+QLabel#brandSub {{ font-size: 12px; color: #64748b; }}
 QListWidget#nav {{ background: transparent; border: none; outline: none; }}
-QListWidget#nav::item {{ border-radius: 10px; margin: 2px 10px; }}
+QListWidget#nav::item {{ border-radius: 8px; margin: 1px 10px; }}
 QListWidget#nav::item:hover {{ background: rgba(255,255,255,0.04); }}
-QListWidget#nav::item:selected {{ background: rgba(255,209,102,0.10); }}
-QLabel#navTitle {{ font-size: 13px; font-weight: 700; color: #c6d1e2; }}
-QLabel#navTitle[active="true"] {{ color: @GOLD@; }}
-QLabel#navSub {{ font-size: 11px; color: #66768f; }}
-QLineEdit#navSearch {{ background: #111b2e; border: 1px solid rgba(255,255,255,0.08); border-radius: 9px; padding: 6px 10px; color: #e8eef8; }}
-QLineEdit#navSearch:focus {{ border-color: rgba(255,209,102,0.55); }}
+QListWidget#nav::item:selected {{ background: rgba(106,212,255,0.10); }}
+QListWidget#nav::item:disabled {{ background: transparent; }}
+QLabel#navGroup {{ font-size: 11px; font-weight: 700; color: #5b6b85; padding-left: 4px; }}
+QLabel#navTitle {{ font-size: 13px; color: #b6c2d4; }}
+QLabel#navTitle[active="true"] {{ color: @GOLD@; font-weight: 700; }}
+QLabel#navSub {{ font-size: 11px; color: #64748b; }}
+QLineEdit#navSearch {{ background: #111a2b; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 6px 10px; color: #e2e8f0; }}
+QLineEdit#navSearch:focus {{ border-color: rgba(106,212,255,0.60); }}
 QListWidget#searchResults {{ background: transparent; border: none; outline: none; }}
-QListWidget#searchResults::item {{ border-radius: 10px; margin: 2px 10px; color: #66768f; }}
+QListWidget#searchResults::item {{ border-radius: 8px; margin: 1px 10px; color: #64748b; }}
 QListWidget#searchResults::item:hover {{ background: rgba(255,255,255,0.04); }}
-QListWidget#searchResults::item:selected {{ background: rgba(255,209,102,0.10); }}
-QLabel#searchHit {{ font-size: 13px; font-weight: 700; color: #d3dcea; }}
-QLabel#pageTitle {{ font-size: 20px; font-weight: 700; color: #f8fafc; }}
-QLabel#pageDesc {{ font-size: 12px; color: @MUTED@; }}
-QFrame#card {{ background: #131e33; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }}
+QListWidget#searchResults::item:selected {{ background: rgba(106,212,255,0.10); }}
+QLabel#searchHit {{ font-size: 13px; font-weight: 700; color: #d5deea; }}
+QLabel#pageTitle {{ font-size: 21px; font-weight: 700; color: #f1f5f9; }}
+QLabel#pageDesc {{ font-size: 13px; color: @MUTED@; }}
+QFrame#card {{ background: #141e30; border: 1px solid rgba(255,255,255,0.06); border-radius: 12px; }}
+QWidget#cardHead {{ background: transparent; border-radius: 12px; }}
+QWidget#cardHead:hover {{ background: rgba(255,255,255,0.025); }}
+QLabel#cardChevron {{ color: #8a98b0; font-size: 14px; }}
+QLabel#cardCount {{ color: #64748b; font-size: 12px; }}
 QLabel#cardTitle {{ font-size: 14px; font-weight: 700; color: #f1f5f9; }}
 QLabel#cardDesc {{ font-size: 12px; color: @MUTED@; }}
-QLabel#fieldLabel {{ font-size: 13px; color: #d3dcea; }}
-QLabel#help {{ font-size: 12px; color: #7d8ca6; }}
+QFrame#rowSep {{ background: rgba(255,255,255,0.06); border: none; min-height: 1px; max-height: 1px; }}
+QLabel#fieldLabel {{ font-size: 13px; color: #e2e8f0; }}
+QLabel#help {{ font-size: 12px; color: #7b8aa3; }}
 QLabel#bullet {{ font-size: 12px; color: #a9b6ca; }}
 QLabel#bigName {{ font-size: 17px; font-weight: 700; color: #f8fafc; }}
 QLabel#pill {{ background: #0b1526; border: 1px solid rgba(255,255,255,0.08); border-radius: 11px;
@@ -111,15 +119,15 @@ QComboBox::down-arrow {{ image: url(@ASSETS@/down.png); width: 10px; height: 6px
 QComboBox::down-arrow:on {{ image: url(@ASSETS@/up.png); }}
 QComboBox QAbstractItemView {{ background: #0f1b30; color: #e8eef8; border: 1px solid rgba(255,255,255,0.10);
     border-radius: 8px; padding: 4px; outline: none; selection-background-color: rgba(106,212,255,0.18); }}
-QPushButton {{ background: #1a2740; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
+QPushButton {{ background: #1a2539; color: #dbe6f5; border: 1px solid rgba(255,255,255,0.08); border-radius: 8px;
     padding: 7px 16px; }}
 QPushButton:hover {{ background: #22344f; border-color: rgba(106,212,255,0.35); color: #ffffff; }}
 QPushButton:pressed {{ background: #1c2c45; }}
 QPushButton:disabled {{ color: #56657d; background: #141e31; border-color: rgba(255,255,255,0.04); }}
-QPushButton#primary {{ background: @GOLD@; color: #1d1706; border: none; font-weight: 700; padding: 7px 20px; }}
-QPushButton#primary:hover {{ background: #ffe08a; }}
-QPushButton#primary:pressed {{ background: #f2c14f; }}
-QPushButton#primary:disabled {{ background: #34352c; color: #7f7a60; }}
+QPushButton#primary {{ background: @GOLD@; color: #06202c; border: none; font-weight: 700; padding: 7px 22px; }}
+QPushButton#primary:hover {{ background: #8fe0ff; }}
+QPushButton#primary:pressed {{ background: #4fc3ef; }}
+QPushButton#primary:disabled {{ background: #1c2a3e; color: #5b6b85; }}
 QPushButton#danger {{ color: #ff9d9d; }}
 QPushButton#danger:hover {{ background: rgba(255,107,107,0.14); border-color: rgba(255,107,107,0.50); color: #ffc2c2; }}
 QPushButton#link {{ background: transparent; border: none; color: @CYAN@; padding: 4px 6px; }}
@@ -128,7 +136,7 @@ QFrame#segBar {{ background: #0b1526; border: 1px solid rgba(255,255,255,0.07); 
 QPushButton#seg {{ background: transparent; border: none; color: #93a4bf; padding: 7px 18px; border-radius: 8px; }}
 QPushButton#seg:hover {{ color: #e8eef8; }}
 QPushButton#seg:checked {{ background: #22344f; color: @GOLD@; font-weight: 700; }}
-QWidget#footer {{ background: #0c1527; border-top: 1px solid rgba(255,255,255,0.06); }}
+QWidget#footer {{ background: #0b1322; border-top: 1px solid rgba(255,255,255,0.06); }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px 2px 4px 0; }}
 QScrollBar::handle:vertical {{ background: rgba(255,255,255,0.12); border-radius: 3px; min-height: 36px; }}
@@ -143,7 +151,7 @@ QListWidget#plain::item:selected {{ background: rgba(106,212,255,0.16); color: #
 QListWidget#gallery {{ background: #0b1526; border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px; outline: none; }}
 QListWidget#gallery::item {{ color: #b8c4d8; border-radius: 8px; padding: 4px; }}
 QListWidget#gallery::item:hover {{ background: rgba(255,255,255,0.05); }}
-QListWidget#gallery::item:selected {{ background: rgba(255,209,102,0.16); color: #ffffff; border: 1px solid rgba(255,209,102,0.55); }}
+QListWidget#gallery::item:selected {{ background: rgba(106,212,255,0.14); color: #ffffff; border: 1px solid rgba(106,212,255,0.55); }}
 QToolTip {{ background: #1a2740; color: #e8eef8; border: 1px solid rgba(255,255,255,0.12); padding: 6px 8px; }}
 QMessageBox {{ background: #0f172a; }}
 QMessageBox QLabel {{ color: #e8eef8; }}
@@ -184,7 +192,7 @@ def _ensure_assets():
 
 def build_style():
     return _STYLE_TEMPLATE.replace("{{", "{").replace("}}", "}").replace("@ASSETS@", _ensure_assets()) \
-        .replace("@FONT@", FONT_STACK).replace("@MONO@", MONO_STACK).replace("@GOLD@", GOLD) \
+        .replace("@FONT@", FONT_STACK).replace("@MONO@", MONO_STACK).replace("@GOLD@", ACCENT) \
         .replace("@CYAN@", CYAN).replace("@GREEN@", GREEN).replace("@RED@", RED).replace("@AMBER@", AMBER) \
         .replace("@MUTED@", MUTED)
 
@@ -528,7 +536,7 @@ class ToggleSwitch(QCheckBox):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing)
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        off, on = QColor("#2b3953"), QColor(GOLD)
+        off, on = QColor("#2b3953"), QColor("#38bdf8")
         t = self._pos
         track = QColor(
             int(off.red() + (on.red() - off.red()) * t),
@@ -553,6 +561,59 @@ class _Bridge(QObject):
 
 
 # ---------------------------------------------------------------- 页面基类
+PAGE_MAX_WIDTH = 860
+
+
+class CollapsibleCard(QFrame):
+    """可折叠的设置卡片：标题行点一下展开 / 收起，标题右侧显示项数。"""
+
+    def __init__(self, title, desc=None, count=None, expanded=True):
+        super().__init__()
+        self.setObjectName("card")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        self.head = QWidget()
+        self.head.setObjectName("cardHead")
+        self.head.setAttribute(Qt.WA_StyledBackground, True)
+        self.head.setCursor(Qt.PointingHandCursor)
+        self.head.setToolTip("点击展开 / 收起")
+        hl = QHBoxLayout(self.head)
+        hl.setContentsMargins(18, 14, 18, 14)
+        hl.setSpacing(10)
+        self.chevron = _label("▾", "cardChevron")
+        self.chevron.setFixedWidth(14)
+        hl.addWidget(self.chevron, 0, Qt.AlignTop)
+        texts = QVBoxLayout()
+        texts.setSpacing(3)
+        texts.addWidget(_label(title, "cardTitle"))
+        if desc:
+            texts.addWidget(_label(desc, "cardDesc", wrap=True))
+        hl.addLayout(texts, 1)
+        if count:
+            hl.addWidget(_label(f"{count} 项", "cardCount"), 0, Qt.AlignTop)
+        outer.addWidget(self.head)
+        self.body_widget = QWidget()
+        self.body_widget.setProperty("collapsibleBody", True)
+        self.content = QVBoxLayout(self.body_widget)
+        self.content.setContentsMargins(40, 0, 20, 16)
+        self.content.setSpacing(0)
+        outer.addWidget(self.body_widget)
+        self.head.mousePressEvent = self._on_click
+        self.set_expanded(expanded)
+
+    def _on_click(self, event):
+        if event.button() == Qt.LeftButton:
+            self.set_expanded(not self.body_widget.isVisibleTo(self))
+
+    def set_expanded(self, expanded):
+        self.body_widget.setVisible(bool(expanded))
+        self.chevron.setText("▾" if expanded else "▸")
+
+    def is_expanded(self):
+        return self.body_widget.isVisibleTo(self)
+
+
 class SettingsPage(QWidget):
     key = ""
     title = ""
@@ -571,8 +632,9 @@ class SettingsPage(QWidget):
         outer.setSpacing(0)
 
         header = QWidget()
+        header.setMaximumWidth(PAGE_MAX_WIDTH + 64)
         hl = QHBoxLayout(header)
-        hl.setContentsMargins(32, 26, 32, 14)
+        hl.setContentsMargins(36, 28, 32, 16)
         hl.setSpacing(12)
         titles = QVBoxLayout()
         titles.setSpacing(5)
@@ -582,25 +644,36 @@ class SettingsPage(QWidget):
         self.chip = _chip("", "off")
         self.chip.hide()
         hl.addWidget(self.chip, 0, Qt.AlignTop)
+        self.header_layout = hl
         outer.addWidget(header)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        # 内容限制最大宽度，宽屏下不把一行字和右侧控件拉得老远
+        holder = QWidget()
+        holder.setObjectName("pageHolder")
+        hold = QHBoxLayout(holder)
+        hold.setContentsMargins(0, 0, 0, 0)
+        hold.setSpacing(0)
         body = QWidget()
         body.setObjectName("pageBody")
+        body.setMaximumWidth(PAGE_MAX_WIDTH + 62)
         self.body = QVBoxLayout(body)
-        self.body.setContentsMargins(32, 4, 26, 24)
-        self.body.setSpacing(14)
-        scroll.setWidget(body)
+        self.body.setContentsMargins(36, 2, 26, 28)
+        self.body.setSpacing(12)
+        hold.addWidget(body, 1)
+        hold.addStretch(0)
+        scroll.setWidget(holder)
         outer.addWidget(scroll, 1)
+        self._collapsibles = []
 
         footer = QWidget()
         footer.setObjectName("footer")
         footer.setAttribute(Qt.WA_StyledBackground, True)
         fl = QHBoxLayout(footer)
-        fl.setContentsMargins(32, 12, 32, 12)
+        fl.setContentsMargins(36, 12, 32, 12)
         fl.setSpacing(10)
         self.status = _label(self.footer_hint, "status")
         fl.addWidget(self.status, 1)
@@ -629,7 +702,12 @@ class SettingsPage(QWidget):
         pass
 
     # 通用 --------------------------------------------------------------
-    def card(self, title=None, desc=None, into=None):
+    def card(self, title=None, desc=None, into=None, collapsible=False, count=None, expanded=True):
+        if collapsible and title:
+            card = CollapsibleCard(title, desc, count, expanded)
+            self._collapsibles.append(card)
+            (into if into is not None else self.body).addWidget(card)
+            return card.content
         frame = QFrame()
         frame.setObjectName("card")
         lay = QVBoxLayout(frame)
@@ -645,6 +723,10 @@ class SettingsPage(QWidget):
             lay.addLayout(head)
         (into if into is not None else self.body).addWidget(frame)
         return lay
+
+    def set_all_expanded(self, expanded):
+        for c in self._collapsibles:
+            c.set_expanded(expanded)
 
     def toggle_row(self, layout, title, help_text):
         row = QHBoxLayout()
@@ -764,7 +846,7 @@ class SettingsPage(QWidget):
 class AccountPage(SettingsPage):
     key = "account"
     title = "账号与角色"
-    desc = "机器人使用的 QQ 号、昵称和绑定的人格角色。选用其它账号时，会自动用该号重启 NapCat 和机器人。"
+    desc = "机器人使用的 QQ 号、昵称和绑定的人格角色。SnowLuma 模式下账号必须先在本地管理页手动加载，再由登录助手确认。"
     savable = False
     footer_hint = "账号操作点按即生效；角色绑定需点「保存角色」。"
 
@@ -786,7 +868,7 @@ class AccountPage(SettingsPage):
         row.addWidget(self.cur_chip, 0, Qt.AlignVCenter)
         lay.addLayout(row)
 
-        lay = self.card("账号列表", "选中账号后可以修改绑定角色、选用或删除；输入新 QQ 号会自动从 NapCat 获取昵称。")
+        lay = self.card("账号列表", "选中账号可修改绑定角色或删除；传统接入可选用已保存账号。SnowLuma下请在本地管理页加载QQ后由登录助手确认。")
         cols = QHBoxLayout()
         cols.setSpacing(18)
         self.plist = QListWidget()
@@ -890,7 +972,7 @@ class AccountPage(SettingsPage):
         p.setPen(Qt.NoPen)
         p.setBrush(QColor("#22344f"))
         p.drawEllipse(0, 0, 52, 52)
-        p.setPen(QColor(GOLD))
+        p.setPen(QColor(ACCENT))
         f = QFont(self.font())
         f.setPixelSize(22)
         f.setBold(True)
@@ -933,6 +1015,9 @@ class AccountPage(SettingsPage):
                 self.plist.setCurrentItem(item)
         self.plist.blockSignals(False)
         self._on_select()
+        from furina.core import qq_transport
+        self.use_btn.setVisible(not qq_transport.uses_snowluma())
+        self.use_btn.setToolTip("SnowLuma模式下，请在本地管理页手动加载账号并在登录助手确认" if qq_transport.uses_snowluma() else "切换前会重启NapCat与机器人")
         self.set_chip("", "off")
 
     def _on_select(self):
@@ -956,7 +1041,7 @@ class AccountPage(SettingsPage):
         self.acc_status.setText(text)
         set_prop(self.acc_status, "tone", tone)
 
-    # 昵称获取（NapCat HTTP 接口，与原 QQ 管理窗口一致）--------------------
+    # 昵称获取（当前 QQ 接入端的本机 OneBot HTTP 接口，与原 QQ 管理窗口一致）--------------------
     def _schedule_fetch(self, *_):
         text = self.qq_edit.text().strip()
         self._fetch_timer.stop()
@@ -980,21 +1065,34 @@ class AccountPage(SettingsPage):
             return
         if self._nam is None:
             self._nam = QNetworkAccessManager(self)
+        from furina.core import qq_transport
+
+        # 走当前 QQ 接入端的本机 OneBot HTTP（NapCat 默认 3000；SnowLuma 用 SNOWLUMA_HTTP_URL 并带访问令牌）
+        try:
+            base = qq_transport.onebot_url().rstrip("/")
+            headers = qq_transport.onebot_headers()
+            transport = "SnowLuma" if qq_transport.uses_snowluma() else "NapCat"
+        except ValueError as exc:
+            self._acc_status(f"QQ 接入端配置有误：{exc}，可手动填写昵称", "err")
+            return
         self._fetch_state["qq"] = qq
-        self._acc_status("正在从 NapCat 获取昵称…", "info")
-        reply = self._nam.get(QNetworkRequest(QUrl(f"http://127.0.0.1:3000/get_stranger_info?user_id={qq}")))
+        self._acc_status(f"正在从 {transport} 获取昵称…", "info")
+        request = QNetworkRequest(QUrl(f"{base}/get_stranger_info?user_id={qq}"))
+        for name, value in headers.items():
+            request.setRawHeader(name.encode("ascii"), value.encode("utf-8"))
+        reply = self._nam.get(request)
 
         def finished():
             try:
                 if self._fetch_state["qq"] != qq:
                     return
                 if reply.error() != QNetworkReply.NoError:
-                    self._acc_status(f"获取失败：无法连接 NapCat（{reply.errorString()}），可手动填写昵称", "err")
+                    self._acc_status(f"获取失败：无法连接 {transport}（{reply.errorString()}），可手动填写昵称", "err")
                     return
                 data = json.loads(bytes(reply.readAll()).decode("utf-8", errors="ignore") or "{}")
                 nick = (data.get("data") or {}).get("nickname", "")
                 if data.get("status") == "failed" or not nick:
-                    self._acc_status("没有取到昵称：QQ 号无效或 NapCat 未登录，可手动填写", "err")
+                    self._acc_status(f"没有取到昵称：QQ 号无效或 {transport} 未登录，可手动填写", "err")
                     return
                 self.nick_edit.setText(nick)
                 self._acc_status(f"✓ 已获取昵称：{nick}", "ok")
@@ -1072,6 +1170,10 @@ class AccountPage(SettingsPage):
             self._acc_status(f"已删除 {qq}", "info")
 
     def _on_use(self):
+        from furina.core import qq_transport
+        if qq_transport.uses_snowluma():
+            self._acc_status("SnowLuma模式下不能用此处切换登录；请手动加载QQ后在登录助手确认。", "warn")
+            return
         panel = self.panel
         if getattr(panel, "busy", False):
             self._acc_status("机器人正在启动或停止，请完成后再切换账号", "warn")
@@ -1729,6 +1831,14 @@ class AppearancePage(SettingsPage):
 from .settings_env import schema_page_specs  # noqa: E402  （依赖上面的 SettingsPage 等，必须放在类定义之后）
 
 _ENV = {spec[0]: spec for spec in schema_page_specs()}
+
+# 左侧导航分组（只影响显示顺序；没列到的页会自动放进「更多」）
+NAV_GROUPS = (
+    ("账号与模型", ("account", "model")),
+    ("聊天", ("brain", "chat", "huoren", "voice", "context", "interact", "websearch")),
+    ("功能", ("bili", "digest", "pixiv", "reminder", "search", "jm", "push", "miyoushe")),
+    ("系统", ("login", "appearance", "other")),
+)
 PAGES = (
     ("account", "账号与角色", "QQ 号与人格角色", AccountPage),
     ("model", "AI 模型", "接口与连接测试", ModelPage),
@@ -1787,7 +1897,7 @@ class SettingsCenter(QDialog):
         self.setObjectName("settingsCenter")
         self.setWindowTitle("设置")
         pal = self.palette()
-        pal.setColor(QPalette.ColorRole.Window, QColor("#0f172a"))
+        pal.setColor(QPalette.ColorRole.Window, QColor("#0d1524"))
         self.setPalette(pal)
         self.setAutoFillBackground(True)
         self.setStyleSheet(build_style())
@@ -1801,19 +1911,19 @@ class SettingsCenter(QDialog):
         side = QWidget()
         side.setObjectName("sidebar")
         side.setAttribute(Qt.WA_StyledBackground, True)
-        side.setFixedWidth(236)
+        side.setFixedWidth(224)
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(0, 26, 0, 18)
+        sl.setContentsMargins(0, 24, 0, 16)
         sl.setSpacing(0)
         brand = QVBoxLayout()
-        brand.setContentsMargins(24, 0, 24, 18)
+        brand.setContentsMargins(22, 0, 22, 16)
         brand.setSpacing(4)
         brand.addWidget(_label("设置", "brandTitle"))
         brand.addWidget(_label("机器人与控制面板配置", "brandSub"))
         sl.addLayout(brand)
         # 总搜索：输入就在左侧列出所有页里匹配的设置项，点一下跳过去并高亮那一项
         search_box = QVBoxLayout()
-        search_box.setContentsMargins(16, 0, 16, 12)
+        search_box.setContentsMargins(14, 0, 14, 8)
         self.search = _SearchEdit()
         self.search.setObjectName("navSearch")
         self.search.setPlaceholderText("搜索设置项（Ctrl+F）")
@@ -1854,7 +1964,7 @@ class SettingsCenter(QDialog):
                 widget = _ErrorPage(title, exc)
             self.pages.append((key, widget))
             self.stack.addWidget(widget)
-            self._add_nav(key, title, sub)
+        self._build_nav()
         self.nav.currentRowChanged.connect(self._on_nav)
         self.search.textChanged.connect(self._on_search)
         self.search.returnPressed.connect(self._open_first_result)
@@ -1944,11 +2054,17 @@ class SettingsCenter(QDialog):
 
     def _reveal(self, page, label):
         try:
+            w = label.parentWidget()
+            while w is not None and w is not page:
+                if isinstance(w, CollapsibleCard):
+                    w.set_expanded(True)
+                w = w.parentWidget()
             scroll = page.findChild(QScrollArea)
             if scroll is not None and label.isVisibleTo(page):
+                QApplication.processEvents()  # 刚展开的卡片要先排版，滚动位置才准
                 scroll.ensureWidgetVisible(label, 0, 120)
             old = label.styleSheet()
-            label.setStyleSheet(f"color: {GOLD}; background: rgba(255,209,102,0.16); border-radius: 4px; padding: 0 4px;")
+            label.setStyleSheet(f"color: {ACCENT}; background: rgba(106,212,255,0.16); border-radius: 4px; padding: 0 4px;")
         except RuntimeError:  # 那一项已经被重新生成（比如「其他配置项」刚重载）
             return
 
@@ -1959,34 +2075,62 @@ class SettingsCenter(QDialog):
                 pass
         QTimer.singleShot(1800, restore)
 
-    def _add_nav(self, key, title, sub):
+    def _build_nav(self):
+        """左侧导航按分组排列（分组标题不可选）；页面顺序 / 下标仍按 PAGES，不影响其它代码。"""
+        index = {key: i for i, (key, _w) in enumerate(self.pages)}
+        placed, groups = set(), []
+        for name, keys in NAV_GROUPS:
+            ks = [k for k in keys if k in index]
+            placed.update(ks)
+            groups.append((name, ks))
+        rest = [k for k, _w in self.pages if k not in placed]
+        if rest:
+            groups.append(("更多", rest))
+        rows = {}
+        for gi, (name, keys) in enumerate(groups):
+            if not keys:
+                continue
+            head = QListWidgetItem()
+            head.setFlags(Qt.NoItemFlags)
+            head.setSizeHint(QSize(200, 42 if gi else 30))
+            hw = QWidget()
+            hw.setAttribute(Qt.WA_TranslucentBackground, True)
+            hhl = QVBoxLayout(hw)
+            hhl.setContentsMargins(14, 0, 12, 4)
+            hhl.addStretch(1)
+            hhl.addWidget(_label(name, "navGroup"))
+            self.nav.addItem(head)
+            self.nav.setItemWidget(head, hw)
+            for k in keys:
+                spec = PAGES[index[k]]
+                rows[index[k]] = self._add_nav(k, spec[1], spec[2], index[k])
+        self._nav_rows = [rows[i] for i in range(len(self.pages))]  # 按页面顺序，refresh_nav_marks 依赖
+
+    def _add_nav(self, key, title, sub, page_index):
         item = QListWidgetItem()
         item.setData(Qt.UserRole, key)
+        item.setData(Qt.UserRole + 1, page_index)
         item.setData(Qt.AccessibleTextRole, title)  # 行内容是自绘控件，给读屏 / UI 自动化一个名字
         w = QWidget()
         w.setAttribute(Qt.WA_TranslucentBackground, True)
+        w.setToolTip(sub)
         hl = QHBoxLayout(w)
-        hl.setContentsMargins(12, 5, 12, 5)
-        hl.setSpacing(12)
+        hl.setContentsMargins(10, 0, 10, 0)
+        hl.setSpacing(10)
         icon = QLabel()
-        icon.setFixedSize(36, 36)
+        icon.setFixedSize(24, 24)
         hl.addWidget(icon)
-        texts = QVBoxLayout()
-        texts.setSpacing(1)
         t = _label(title, "navTitle")
-        s = _label(sub, "navSub")
-        texts.addWidget(t)
-        texts.addWidget(s)
-        hl.addLayout(texts, 1)
+        hl.addWidget(t, 1)
         dot = _label("●", "navSub")
         dot.setStyleSheet(f"color: {AMBER}; font-size: 10px;")
         dot.setToolTip("有未保存的修改")
         dot.hide()
         hl.addWidget(dot)
-        item.setSizeHint(QSize(200, 48))
+        item.setSizeHint(QSize(200, 36))
         self.nav.addItem(item)
         self.nav.setItemWidget(item, w)
-        self._nav_rows.append((key, icon, t, dot))
+        return (key, icon, t, dot)
 
     def _match_panel_geometry(self, panel):
         """和主界面一样大、叠在主界面正上方；仍可自由拉伸。"""
@@ -2024,26 +2168,33 @@ class SettingsCenter(QDialog):
         self.setGeometry(t.x() + dx, t.y() + dy, w, h)
 
     def _on_nav(self, row):
-        if row < 0:
+        item = self.nav.item(row) if row >= 0 else None
+        page_index = item.data(Qt.UserRole + 1) if item is not None else None
+        if page_index is None:
             return
-        self.stack.setCurrentIndex(row)
+        self.stack.setCurrentIndex(page_index)
         for i, (key, icon, title, _dot) in enumerate(self._nav_rows):
-            active = i == row
-            icon.setPixmap(_nav_icon(key, GOLD if active else "#8fa0bb"))
+            active = i == page_index
+            pix = _nav_icon(key, ACCENT if active else "#7f8ea8")
+            pix.setDevicePixelRatio(1.5)  # 36px 画布缩到 24px 显示，高分屏下依旧清晰
+            icon.setPixmap(pix)
             set_prop(title, "active", "true" if active else "false")
+
+    def _nav_row_of(self, page_index):
+        for r in range(self.nav.count()):
+            if self.nav.item(r).data(Qt.UserRole + 1) == page_index:
+                return r
+        return -1
 
     def refresh_nav_marks(self):
         for (key, _icon, _title, dot), (_k, page) in zip(self._nav_rows, getattr(self, "pages", [])):
             dot.setVisible(bool(getattr(page, "is_dirty", lambda: False)()))
 
     def select(self, key):
-        for i, (k, _page) in enumerate(self.pages):
-            if k == key:
-                self.nav.setCurrentRow(i)
-                self._on_nav(i)
-                return
-        self.nav.setCurrentRow(0)
-        self._on_nav(0)
+        target = next((i for i, (k, _page) in enumerate(self.pages) if k == key), 0)
+        row = self._nav_row_of(target)
+        self.nav.setCurrentRow(row)
+        self._on_nav(row)
 
     def page(self, key):
         return next((p for k, p in self.pages if k == key), None)

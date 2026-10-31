@@ -20,7 +20,7 @@ from . import db, env
 
 _NS = "persona"
 FURINA_ALIASES = ("芙宁娜", "芙芙", "水神大人")
-FURINA_SELF_WORDS = ("芙芙", "芙宁娜", "本水神", "本导演", "本大导演", "水神大人", "本大明星", "芙宁娜大人")
+FURINA_SELF_WORDS = ("本芙", "芙芙", "芙宁娜", "本水神", "本导演", "本大导演", "水神大人", "本大明星", "芙宁娜大人")
 _CURRENT = object()  # 哨兵：表示"当前 QQ 绑定的角色"
 _AT_CQ_RE = re.compile(r"\[(?:CQ:)?at[:,]qq=(\d+)[^\]]*\]")
 

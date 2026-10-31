@@ -156,7 +156,7 @@ class PicInboxTest(unittest.TestCase):
         sub = self.eagle / "足迹"
         sub.mkdir(parents=True)
         _env.write_env(f"PIC_INBOX_DIR={self.root}\nPIC_INBOX_EXPORT_DIR={self.eagle}\n"
-                       f"PIC_INBOX_ENHANCE_UNDER_KB=0\nEAGLE_LIBRARY_DIR=D:\\Pictures\\Eagle.library\n")
+                       f"PIC_INBOX_ENHANCE_UNDER_KB=0\nEAGLE_LIBRARY_DIR=E:\\足迹.library\n")
         self.assertEqual(svc.export_dir(), sub)
         iid, _ = svc.add_bytes(_img(1200, 900, 11), "group")
         svc.decide(iid, True)

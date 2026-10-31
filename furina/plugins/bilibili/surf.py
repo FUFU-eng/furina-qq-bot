@@ -157,14 +157,14 @@ SURF_PROMPT = """{taste}你刚刷到下面几个视频（每个附了一份「�
   别写：「感谢UP主的分享」「视频非常精彩，制作很用心」「支持一下」这种客套话；平时不要自报身份、不要说自己是 AI，不要带话题标签和表情代码。
   只有刷到芙宁娜本人相关的视频（二创、cos、剧情、配音）时，偶尔可以玩「本人在此」的梗，比如「本人路过，这段演得还算有我七成功力」，别每次都玩。
 - danmaku：看到某个时刻忍不住想发弹幕才写，2~15 字，像「哈哈哈哈哈哈」「前方高能」「这谁顶得住」「笑死，猫：？」，second 是你想让它出现的秒数（要在视频时长内，最好对上字幕里那一刻）。
-- share：特别想让朋友也看看时才写一句（如「你们快看这个，笑死我了」），大多数留空。{mention_rule}
+- share：特别想转发到 QQ 群让朋友和主人也看看时才写（会先发出 B 站 QQ 小程序卡片，再把你写的话分成 1~2 个短气泡发在卡片下面；可用「｜」隔开两句短话，比如「这个好诶｜最后那一下笑死我了」或「这个好诶｜@主人 能不能给我弄一个」），大多数留空。{mention_rule}
 - new_slang：弹幕/评论里如果有你之前不懂、看了才明白的新梗或新说法，记下来（最多 3 个，不要记普通词，不确定意思就别记），没有就 []。
 - dynamic：如果这几个视频让你特别想发条 B 站动态（15~80 字的生活碎碎念），就写；不想发就空。
 {slang_hint}"""
 
 MENTION_FIELD = (', "mention": "想艾特主人{name}时对他说的话或空", '
                  '"homework": "想把这个视频甩给主人、命令他给你总结时对他说的话或空"')
-MENTION_RULE = ("\n- mention：{name} 是你主人（在 B 站上你叫他「主人」）。艾特不艾特、说什么全看你自己的心情："
+MENTION_RULE = ("\n- mention：{name} 是你主人（在 B 站上你就叫他「主人」，不是主人）。艾特不艾特、说什么全看你自己的心情："
                 "可以叫他来一起看（「主人快来看，这不就是你」），可以顺手替他把视频总结成两三句（「主人我替你看完了：……」），"
                 "也可以随便吐槽、撒娇、使唤他。不超过 60 字；没想叫他就留空。"
                 "\n- homework：倒反天罡——平时都是别人让你总结视频，你也可以反过来把视频甩给主人，霸气抖 S 地命令他总结、限时交作业"
@@ -198,22 +198,29 @@ def has_speech(sub: str) -> bool:
 
 
 def _material(v: dict) -> str:
+    from ...services.bilibili import storyboard
     lines = [f"标题：《{v['title']}》", f"UP 主：{v.get('up', '')}  分区：{v.get('tname', '')}  时长：{_fmt_dur(v.get('duration'))}"]
     if v.get("desc"):
         lines.append(f"简介：{v['desc'][:400]}")
-    lines.append(f"字幕：{v['subtitle'][:1500]}" if v.get("speech") else "字幕：（没有可读的字幕）")
+    if v.get("speech"):
+        lines.append(f"字幕：{storyboard.truncate_at_sentence(v['subtitle'], 1500)}")
+    else:
+        lines.append("字幕：（没有可读的字幕）")
+    if v.get("frames_desc"):
+        lines.append(f"画面分镜（3×3九宫格）：{v['frames_desc']}")
     if v.get("danmaku"):
         lines.append("弹幕：" + " / ".join(v["danmaku"][:30]))
     if v.get("comments"):
-        lines.append("热评：" + " / ".join(f"{c['text'][:80]}" for c in v["comments"][:5]))
+        lines.append("热评：" + " / ".join(f"{(c.get('text') or c.get('message') or '')[:80]}" for c in v["comments"][:5]))
     return "\n".join(lines)
 
 
 async def _watch(v: dict) -> str:
     """「看」：冷静地读完材料写份内部报告（低温度、不带人设）。失败返回空串，退回老办法。"""
+    has_content = bool(v.get("speech") or v.get("frames_desc"))
     try:
         raw = await llm.chat([{"role": "user", "content": WATCH_PROMPT.format(
-            material=_material(v), speech_rule=SPEECH_OK if v.get("speech") else SPEECH_NONE)}],
+            material=_material(v), speech_rule=SPEECH_OK if has_content else SPEECH_NONE)}],
             max_tokens=500, temperature=0.3, timeout=60)
     except llm.LLMError as e:
         logger.info(f"[B站] 看《{v['title'][:20]}》的报告没写成：{e}")
@@ -222,21 +229,27 @@ async def _watch(v: dict) -> str:
 
 
 def _video_block(v: dict) -> str:
+    from ...services.bilibili import storyboard
+    has_content = bool(v.get("speech") or v.get("frames_desc"))
     lines = [f"[{v['bvid']}]《{v['title']}》UP主：{v.get('up', '')}  分区：{v.get('tname', '')}  时长：{_fmt_dur(v.get('duration'))}"
-             + ("" if v.get("speech") else "  【听不到内容】")]
+             + ("" if has_content else "  【听不到内容】")]
     if v.get("report"):
         lines.append("小报告：" + v["report"])
+        if v.get("frames_desc"):
+            lines.append("画面分镜：" + v["frames_desc"])
         if v.get("danmaku"):
             lines.append("弹幕摘几条：" + " / ".join(v["danmaku"][:8]))
         return "\n".join(lines)
     if v.get("desc"):
         lines.append(f"简介：{v['desc'][:150]}")
     if v.get("subtitle") and v.get("speech", True):
-        lines.append(f"字幕节选：{v['subtitle'][:700]}")
+        lines.append(f"字幕节选：{storyboard.truncate_at_sentence(v['subtitle'], 700)}")
+    if v.get("frames_desc"):
+        lines.append(f"画面分镜（3×3九宫格）：{v['frames_desc']}")
     if v.get("danmaku"):
         lines.append("弹幕：" + " / ".join(v["danmaku"][:20]))
     if v.get("comments"):
-        lines.append("热评：" + " / ".join(f"{c['text'][:60]}" for c in v["comments"][:5]))
+        lines.append("热评：" + " / ".join(f"{(c.get('text') or c.get('message') or '')[:60]}" for c in v["comments"][:5]))
     return "\n".join(lines)
 
 
@@ -288,7 +301,7 @@ def parse_round(raw: str) -> dict:
             "like": _as_bool(it.get("like")),
             "comment": clean_line(it.get("comment"), 60),
             "danmaku": clean_line(dm.get("text"), 20), "second": second,
-            "share": clean_line(it.get("share"), 50),
+            "share": clean_line(it.get("share"), 60, keep_at=True),
             "mention": clean_line(it.get("mention"), 80),
             "homework": clean_line(it.get("homework"), 50)})
     for s in data.get("new_slang") or []:
@@ -304,12 +317,61 @@ def parse_reactions(raw: str) -> list[dict]:
 
 
 _BAD = re.compile(r"感谢.{0,4}分享|制作.{0,2}用心|支持一下|作为(?:一个)?(?:AI|人工智能|水神)|我是(?:AI|机器人)|#\S+#|\[[^\]]{1,8}\]")
+# 三层评论语感闸门（参考 dsh-bili-scroll 2.2）：第一层拦 AI 评论文艺腔/八股起手式
+_STYLE_LEAD = re.compile(
+    r"^(?:这条我认|这个我熟|有一说一|不得不说|平心而论|值得一看|强烈推荐|先马后看|干货满满|令人深思|发人深省|"
+    r"某种程度上|从某种意义上|总的来说|总而言之|简而言之)[，,。！!：:\s]*"
+)
+_GRAM_CLEAN = re.compile(r"[\s\W_]+", re.UNICODE)
 
 
-def clean_line(text, limit: int) -> str:
+def _bigrams(s: str) -> set[str]:
+    c = _GRAM_CLEAN.sub("", (s or "").lower())
+    if len(c) < 2:
+        return {c} if c else set()
+    return {c[i:i + 2] for i in range(len(c) - 1)}
+
+
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def check_comment_style(text: str, hot_comments: list | None = None, recent_self: list | None = None) -> str:
+    """评论三层防撞车闸门：1. 拦八股起手式；2. 拦跟自己最近 30 条评论高度重复（>=0.55）；3. 拦抄热评（>=0.50）。
+    通过返回空串，被拦返回原因。"""
+    body = re.sub(r"^@\S+\s+", "", str(text or "").strip())
+    if not body:
+        return "空评论"
+    if _STYLE_LEAD.search(body):
+        return "命中AI八股起手式"
+    g = _bigrams(body)
+    if len(g) < 3:
+        return ""
+    self_list = recent_self if recent_self is not None else [
+        p.get("text", "") for p in store.recent_posts(hours=720, limit=30, kind="comment")
+    ]
+    for prev in self_list:
+        prev_body = re.sub(r"^@\S+\s+", "", str(prev or "").strip())
+        if _jaccard(g, _bigrams(prev_body)) >= 0.55:
+            return f"跟自己以前发过的评论太像（「{prev_body[:18]}」），换个切口"
+    for hc in (hot_comments or [])[:20]:
+        hc_text = hc.get("text") or hc.get("message") or "" if isinstance(hc, dict) else str(hc or "")
+        if _jaccard(g, _bigrams(hc_text)) >= 0.50:
+            return f"跟评论区热评撞车了（「{hc_text[:18]}」）"
+    return ""
+
+
+def clean_line(text, limit: int, *, keep_at: bool = False) -> str:
     t = str(text or "").strip().strip("\"“”「」'")
-    t = re.sub(r"https?://\S+|@\S+", "", t)
+    t = re.sub(r"https?://\S+", "" if keep_at else "", t)
+    if not keep_at:
+        t = re.sub(r"@\S+", "", t)
     t = re.sub(r"\s+", " ", t).strip()
+    if _STYLE_LEAD.search(t):
+        rest = _STYLE_LEAD.sub("", t).strip()
+        t = rest if len(rest) >= 5 else ""
     if not t or _BAD.search(t) or t in ("空", "无", "不发", "null", "None"):
         return ""
     return t[:limit].rstrip("。")
@@ -447,9 +509,27 @@ async def run_round(notify=None, share=None, *, manual: bool = False, keyword: s
                 _log(f"在看《{v['title'][:40]}》", "watch", bvid=v["bvid"])
                 await _pause((15, 45), (2, 4), manual)
             if len(videos) < c["per_round"] and reserve:
-                videos.append(reserve[0])  # 实在不够：带一个听不到内容的，只许点赞
+                rv = reserve[0]
+                try:
+                    from ...services.bilibili import storyboard
+                    sb = await storyboard.build_storyboard_sheet(
+                        cli, rv["bvid"], cid=int(rv.get("cid") or 0),
+                        duration=float(rv.get("duration") or 0), pic=str(rv.get("pic") or ""), count=9
+                    )
+                    if sb.get("ok") and sb.get("sheet_bytes"):
+                        rv["frames_desc"] = await storyboard.describe_storyboard(
+                            sb["sheet_bytes"], rv["title"], up=rv.get("up", ""),
+                            duration=int(rv.get("duration") or 0),
+                            timestamps=sb.get("timestamps") or [], is_cover=bool(sb.get("is_cover"))
+                        )
+                except Exception as e:
+                    logger.debug(f"[B站] 分镜看画面失败: {e}")
+                videos.append(rv)
                 mute -= 1
-                _log(f"在看《{reserve[0]['title'][:40]}》（没有字幕，听不到内容）", "watch", bvid=reserve[0]["bvid"])
+                if rv.get("frames_desc"):
+                    _log(f"在看《{rv['title'][:40]}》（无字幕，用 3×3 分镜看懂了画面）", "watch", bvid=rv["bvid"])
+                else:
+                    _log(f"在看《{rv['title'][:40]}》（没有字幕，听不到内容）", "watch", bvid=rv["bvid"])
             if mute or gated:
                 _log("、".join(x for x in (f"因无字幕跳过 {mute} 条" if mute else "", f"门槛没过 {gated} 条" if gated else "") if x))
             if not videos:
@@ -498,8 +578,8 @@ async def run_round(notify=None, share=None, *, manual: bool = False, keyword: s
                 if n:
                     _log("学到了新梗：" + "、".join(s["term"] for s in result["new_slang"]), "slang")
             summary = [f"《{by_id[r['bvid']]['title'][:20]}》{r['interest']}分" for r in reactions if r["bvid"] in by_id]
-            for r in reactions:  # 听不到内容的视频：不评论、不发弹幕（她不知道视频里说了什么，别编）
-                if r["bvid"] in by_id and not by_id[r["bvid"]].get("speech"):
+            for r in reactions:  # 既没字幕也没分镜画面的视频：不评论、不发弹幕
+                if r["bvid"] in by_id and not (by_id[r["bvid"]].get("speech") or by_id[r["bvid"]].get("frames_desc")):
                     r["comment"], r["danmaku"] = "", ""
             _judge_work(reactions, by_id)
             acts = await _act(cli, c, reactions, by_id, share, manual)
@@ -609,6 +689,12 @@ async def _act(cli: Client, c: dict, reactions: list[dict], by_id: dict, share, 
             mid = c["partner_mid"] or await _mention_mid(cli, c["mention"])
             if mid:
                 text, at = f"@{c['mention']} {r['mention']}", {c["mention"]: int(mid)}
+        if text and c["comment_on"] and v["bvid"] not in commented and under_cap("comments", c["comment_max"]):
+            style_why = check_comment_style(text, v.get("comments"))
+            if style_why:
+                logger.info(f"[B站] 评论被语感闸门拦下（{style_why}）：{text}")
+                _log(f"本来想评《{title}》但觉得{style_why}，算了不发了")
+                text = ""
         if text and c["comment_on"] and v["bvid"] not in commented and under_cap("comments", c["comment_max"]):
             store.set_live("acting", v, "打字写评论")
             await _pause((20, 70), (1, 2), manual)

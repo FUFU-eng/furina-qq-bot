@@ -263,7 +263,7 @@ const bg = {
 // ================= 状态轮询 / 主页 =================
 const S = { overview: null, eventSince: 0, logSink: null };
 const RAIL_STATES = {
-  stopped: ["机器人未运行", ""], online: ["QQ 在线", "ok"], offline: ["⚠ QQ 离线", "err"],
+  stopped: ["机器人未运行", ""], online: ["QQ 在线", "ok"], snowluma_confirm: ["确认QQ账号", "warn"], snowluma_waiting: ["等待加载QQ", "warn"], snowluma_stopped: ["SnowLuma未运行", "err"], offline: ["⚠ QQ 离线", "err"],
   logged_out: ["⚠ QQ 未登录", "warn"], mismatch: ["⚠ 账号不一致", "err"], unknown: ["状态待确认", "warn"],
 };
 
@@ -277,8 +277,10 @@ function fmtUptime(sec) {
 function renderOverview(o) {
   S.overview = o;
   const st = o.state, h = st.health || {};
+  const snow = o.transport_name === "SnowLuma";
   const running = st.running || st.nonebot;
-  const key = !running && !st.napcat ? "stopped" : (h.state || "unknown");
+  const snowConfirmed = o.snowluma_confirmed && (!o.connected_qq || o.connected_qq === o.bot_qq);
+  const key = snow ? (!st.napcat ? "snowluma_stopped" : h.state === "online" && !snowConfirmed ? "snowluma_confirm" : h.state !== "online" ? "snowluma_waiting" : "online") : !running && !st.napcat ? "stopped" : (h.state || "unknown");
   const [txt, cls] = RAIL_STATES[key] || RAIL_STATES.unknown;
   const rs = $("#railStatus");
   rs.className = `rail-status ${cls}`;
@@ -286,10 +288,10 @@ function renderOverview(o) {
   rs.title = h.detail || "打开登录助手";
 
   $("#homeName").textContent = o.nickname || "芙宁娜";
-  $("#homeSub").textContent = o.bot_qq ? `机器人 QQ ${o.bot_qq}${h.detail && running ? " · " + h.detail : ""}` : "还没有设置机器人 QQ —— 设置 → 账号与角色";
-  const statusText = o.busy ? `${o.busy_label}中` : !running ? "休息中" : h.state === "online" ? "在线" : h.state === "logged_out" ? "待登录" : h.state === "offline" ? "离线" : h.state === "mismatch" ? "账号不符" : "启动中";
+  $("#homeSub").textContent = snow ? `QQ接入：SnowLuma${o.connected_qq ? ` · 当前账号 ${o.connected_qq}` : ""}${h.detail && running ? " · " + h.detail : ""}` : o.bot_qq ? `机器人 QQ ${o.bot_qq}${h.detail && running ? " · " + h.detail : ""}` : "还没有设置机器人 QQ —— 设置 → 账号与角色";
+  const statusText = o.busy ? `${o.busy_label}中` : snow && key === "snowluma_confirm" ? "待确认账号" : snow && key === "snowluma_waiting" ? "等待加载QQ" : !running ? "休息中" : h.state === "online" ? "在线" : h.state === "logged_out" ? "待登录" : h.state === "offline" ? "离线" : h.state === "mismatch" ? "账号不符" : "启动中";
   $("#cStatus").textContent = statusText;
-  $("#cStatusHint").textContent = !running ? "点击右下角启动" : h.state === "online" ? "一切正常" : "点击查看登录助手";
+  $("#cStatusHint").textContent = snow && key === "snowluma_confirm" ? "先确认你刚才手动加载的QQ号" : !running ? "点击右下角启动" : h.state === "online" ? "一切正常" : "点击查看登录助手";
   $("#cGroups").textContent = o.groups == null ? "—" : `${o.groups} 个`;
   const models = Object.entries(o.models || {});
   const mTotal = models.reduce((a, [, v]) => a + v, 0);
@@ -337,7 +339,8 @@ $("#startBtn").onclick = async () => {
   if (!o || o.busy) return;
   const running = o.state.running || o.state.nonebot;
   if (running) {
-    const ok = await confirmBox("停止机器人", "会停止 NoneBot 与机器人用的 NapCat/QQ。\n你自己开的 QQ 不受影响。", { ok: "停止", danger: true });
+    const target = o.transport_name === "SnowLuma" ? "NoneBot 与 SnowLuma 接入端；会先卸载已加载的QQ挂钩，不会结束你选中的QQ客户端。" : "NoneBot 与机器人用的 NapCat/QQ；你自己开的QQ不受影响。";
+    const ok = await confirmBox("停止机器人", `会停止${target}`, { ok: "停止", danger: true });
     if (!ok) return;
   }
   try { await post(`/api/control/${running ? "stop" : "start"}`); pollOverview(); } catch (e) { toastErr(e); }
@@ -355,7 +358,7 @@ $("#startMenu").onclick = async (e) => {
       const r = await post("/api/control/test");
       return confirmBox(r.headline, r.detail, { ok: "知道了", cancel: "关闭" });
     }
-    if (a === "restart_all" && !(await confirmBox("完全重启", "会同时重启 NapCat（机器人用的 QQ）。一般只有换号或 QQ 卡住时才需要。", { ok: "重启" }))) return;
+    if (a === "restart_all" && !(await confirmBox("完全重启", S.overview?.transport_name === "SnowLuma" ? "会停止并重启 SnowLuma 接入端；当前加载的QQ会先尝试安全卸载挂钩。" : "会同时重启 NapCat（机器人用的 QQ）。一般只有换号或 QQ 卡住时才需要。", { ok: "重启" }))) return;
     await post(`/api/control/${a}`);
     pollOverview();
   } catch (err) { toastErr(err); }
@@ -415,8 +418,8 @@ async function showPaths() {
 function showHelp() {
   modal.open(`<div class="modal-head"><h2>使用帮助</h2></div>
     <div class="modal-body"><ol class="steps" style="margin-left:18px;color:var(--text)">
-      <li>右下角金色按钮启动机器人；已登录过的 QQ 会自动快速登录。</li>
-      <li>左下角状态显示 QQ 是否在线，点击打开「登录助手」查看二维码与处理办法。</li>
+      <li>右下角金色按钮启动芙宁娜。SnowLuma 模式不会自动登录或挂钩任何QQ进程。</li>
+      <li>SnowLuma第一次需在本机管理页同意条款、手动选择QQ并Load；然后在登录助手核对账号并确认后才开放消息处理。</li>
       <li>「功能权限」按群开关各项功能，保存后机器人立即生效。</li>
       <li>「回复次数」可改统一上限或给某位群友单独设置；「角色管理」编辑人格与共享设定。</li>
       <li>「设置」里管理账号、AI 模型、Pixiv 推送、定时提醒与壁纸。</li>
@@ -427,48 +430,61 @@ function showHelp() {
 
 // ================= 登录助手 =================
 const LOGIN_TEXT = {
-  restarting: ["正在重启 NapCat…", "请稍候，新的二维码生成后会自动显示。"],
-  online: ["QQ 已在线", "机器人账号已登录，一切正常。"],
-  no_napcat: ["NapCat 未运行", "点「启动」会先启动 NapCat，已登录过的账号会自动快速登录。"],
-  offline: ["QQ 已离线", "通常是在别的设备登录或被风控。点「重启 NapCat」重新扫码即可。"],
-  mismatch: ["账号不一致", "NapCat 登录的不是配置的机器人账号。请在 WebUI 退出后用正确账号扫码，或到「设置 → 账号」切换。"],
-  waiting: ["等待扫码登录", "用手机 QQ 扫描二维码，扫码账号必须是机器人账号。"],
+  restarting: ["正在启动QQ接入端…", "请稍候，检查本机管理页面。"],
+  online: ["QQ 已在线", "机器人账号已确认，消息通道正常。"],
+  no_napcat: ["QQ接入端未运行", "点「启动」会启动已配置的本地接入端。"],
+  offline: ["QQ 已离线", "当前账号离线；不会自动重登或尝试被封账号。"],
+  mismatch: ["账号不一致", "当前在线账号与配置不一致。请确认所选QQ后再绑定。"],
+  waiting: ["等待QQ客户端", "通过本地接入端登录并手动加载目标QQ客户端。"],
+  snowluma_stopped: ["SnowLuma未运行", "启动后会先显示本地管理页；不会自动登录或加载任何QQ。"],
+  snowluma_waiting: ["等待选择QQ", "打开SnowLuma本地管理页，先阅读并同意条款，再选定一个QQ进程并手动点「Load」。自动挂钩保持关闭。"],
+  snowluma_confirm: ["请确认机器人账号", "检测到SnowLuma已连接QQ。核对确实是你打算使用的机器人号后，点确认才会启用聊天并将 BOT_QQ 绑定到该号。"],
 };
 let loginTimer = null;
 function openLogin() {
-  const m = modal.open(`<div class="modal-head"><h2>登录助手</h2><span class="tag" id="lgQQ"></span></div>
+  let loginData = null;
+  const m = modal.open(`<div class="modal-head"><h2>QQ 接入助手</h2><span class="tag" id="lgQQ"></span></div>
     <div class="modal-body"><div class="row" style="align-items:flex-start;gap:18px">
-      <div class="qr" id="lgQr">暂无二维码</div>
+      <div class="qr" id="lgQr">等待本地接入端</div>
       <div class="grow"><div class="login-state" id="lgState">检查中…</div><div class="muted" id="lgText" style="margin-top:6px"></div>
-      <ol class="steps"><li>手机 QQ 扫码时，确认是机器人账号</li><li>二维码约 2 分钟过期，过期后点「重启 NapCat」或在 WebUI 重新获取</li><li>扫码成功后状态会自动变为「QQ 在线」</li></ol>
+      <ol class="steps" id="lgSteps"><li>先选中这个机器人专用的 QQ 客户端</li><li>登录完成后，在接入端手动加载该进程</li><li>账号确认前，机器人会拦住群消息和所有发出操作</li></ol>
       <div id="lgWarn"></div></div></div></div>
-    <div class="modal-foot"><button class="btn" data-l="webui">打开 WebUI</button><span class="grow"></span>
-      <button class="btn" data-l="restart">重启 NapCat</button><button class="btn primary" data-l="start">启动</button></div>`,
+    <div class="modal-foot"><button class="btn" data-l="webui">打开本地管理页</button><span class="grow"></span>
+      <button class="btn" data-l="restart">启动接入端</button><button class="btn primary" data-l="start">启动机器人</button><button class="btn primary" data-l="confirm" id="lgConfirm" style="display:none">确认此QQ并启用</button></div>`,
     { wide: true, onClose: () => clearTimeout(loginTimer) });
   m.onclick = async (e) => {
     const b = e.target.closest("[data-l]"); if (!b) return;
     try {
       if (b.dataset.l === "webui") await post("/api/open/webui");
-      if (b.dataset.l === "start") { await post("/api/control/start"); toast("正在启动…"); }
-      if (b.dataset.l === "restart") {
-        modal._onClose = null; clearTimeout(loginTimer);
-        const ok = await confirmBox("重启 NapCat", "只重启机器人用的 NapCat/QQ 并生成新二维码，你自己开的 QQ 不受影响。\n重启期间机器人会短暂离线。", { ok: "重启" });
-        if (ok) await post("/api/control/restart_napcat");
-        return openLogin();
+      if (b.dataset.l === "start") { await post("/api/control/start"); toast("正在启动；如果尚未绑定QQ，会先只启动SnowLuma管理页"); }
+      if (b.dataset.l === "restart") { await post("/api/control/restart_napcat"); toast("已启动或检查接入端；不会自动登录QQ"); }
+      if (b.dataset.l === "confirm") {
+        const uin = String(loginData?.detected_qq || "");
+        if (!/^\d{5,20}$/.test(uin)) return toast("还没有检测到已加载的QQ账号", "warn");
+        const ok = await confirmBox("确认机器人QQ", `当前SnowLuma接入的QQ是 ${uin}。确认这是你选定的机器人账号吗？确认后才开放群聊处理，并把 BOT_QQ 绑定到该号。`, { ok: "确认并启用" });
+        if (!ok) return;
+        const result = await post("/api/qq-transport/confirm-account", { uin });
+        toast("账号已确认，正在启动芙宁娜", "success");
+        if (!result.bot_start_requested) toast("启动操作未排队，请在主页点击「启动机器人」", "warn");
       }
     } catch (err) { toastErr(err); }
   };
   (async function loop() {
     if (!modal.isOpen || !$("#lgState")) return;
     try {
-      const d = await api("/api/login");
+      const d = await api("/api/login"); loginData = d;
       const [t, tx] = LOGIN_TEXT[d.state] || LOGIN_TEXT.waiting;
+      const snow = d.provider === "snowluma";
       $("#lgState").textContent = t;
-      $("#lgText").textContent = d.state === "online" ? tx : (d.detail && d.state !== "no_napcat" ? d.detail + "。" : "") + tx;
-      $("#lgQQ").textContent = d.qq ? `机器人 QQ ${d.qq}` : "未设置机器人 QQ";
+      $("#lgText").textContent = d.state === "online" ? tx : (d.detail && !["no_napcat", "snowluma_stopped"].includes(d.state) ? d.detail + "。" : "") + tx;
+      $("#lgQQ").textContent = snow ? `检测到 ${d.detected_qq || "未连接"} · 配置 ${d.qq || "待确认"}` : d.qq ? `机器人 QQ ${d.qq}` : "未设置机器人 QQ";
+      $("#lgConfirm").style.display = snow && d.state === "snowluma_confirm" ? "" : "none";
+      $("#lgSteps").innerHTML = snow
+        ? `<li>若首次启动，先在SnowLuma本地管理页阅读并同意它的条款</li><li>手动选择一个要作为机器人的QQ进程，再点击「Load」</li><li>确认显示的账号正是你选定的机器人号，再点「确认此QQ并启用」</li><li>确认之前，机器人不会读群消息、调用模型或发出任何群消息</li>`
+        : `<li>按原NapCat登录流程使用机器人账号扫码</li><li>确认登录账号与BOT_QQ一致</li><li>状态显示在线后机器人即可工作</li>`;
       const qr = $("#lgQr");
-      if (d.qr && d.state !== "online") { qr.style.backgroundImage = `url("/media/qrcode?t=${Math.floor(Date.now() / 4000)}")`; qr.textContent = ""; qr.title = `约 ${d.qr_left} 秒后过期`; }
-      else { qr.style.backgroundImage = ""; qr.textContent = d.state === "online" ? "✓ 已登录" : "暂无二维码"; }
+      if (!snow && d.qr && d.state !== "online") { qr.style.backgroundImage = `url("/media/qrcode?t=${Math.floor(Date.now() / 4000)}")`; qr.textContent = ""; qr.title = `约 ${d.qr_left} 秒后过期`; }
+      else { qr.style.backgroundImage = ""; qr.textContent = snow ? "二维码和进程选择由 SnowLuma 本地管理页提供" : d.state === "online" ? "✓ 已登录" : "暂无二维码"; }
       $("#lgWarn").innerHTML = d.warning ? `<div class="warn-box">${esc(d.warning)}</div>` : "";
     } catch (e) { /* ignore */ }
     loginTimer = setTimeout(loop, 3000);
@@ -478,6 +494,14 @@ $("#railStatus").onclick = openLogin;
 
 // ================= 功能清单 =================
 const FEATURE_GROUPS = [
+  { name: "芙宁娜专属特权 · 全权电脑掌控", c: "#38bdf8", items: [
+    ["七分傲三分娇 · 抖S反杀", "戏剧张力与群友活人感兼具，遇到开黄腔/互损直接高傲毒舌反杀，绝不冷落拒聊，回复条数完全自由", "人设"],
+    ["查岗主人桌面", "静默查看主人当前打开的窗口/游戏并截桌面图发群里吐槽（自动过滤密码与隐私窗口）", "查岗"],
+    ["抖S「记小本本」", "给顶嘴或出糗的群友起绰号、记黑历史，随时翻旧账嘲笑 · 角色管理 → 📕 芙芙的小本本", "小本本"],
+    ["余额救急自动截图", "接口真没钱（402）时自动截 DeepSeek 充值页图发群里并 @主人 撒娇喊充钱", "救急"],
+    ["全权操作电脑 & 画图截网页", "群聊/私聊随时翻 Eagle 足迹图库、截任意网页、手绘图片、执行电脑命令与收发本地文件", "全权"],
+    ["高傲语音反击 & 角色热更新", "抖S反杀/撒娇台词语音概率大幅提升；角色管理页修改人设保存即热更新生效", "热更新"],
+  ] },
   { name: "AI 智能", c: "#ffd166", items: [
     ["AI 聊天", "群聊接话 · 艾特回复 · 情绪、好感与记忆系统", "聊天"],
     ["看图聊天", "发图或引用图片追问，结合最近的图片理解上下文", "视觉"],
@@ -495,6 +519,9 @@ const FEATURE_GROUPS = [
     ["去 AI 味", "删掉「希望对你有帮助」这类客服腔；自称 AI、用 markdown 标题加粗时让她重说 · 设置 → 活人感", "活人感"],
     ["语音消息", "用芙宁娜的声音（本机 GPT-SoVITS）发语音：神气 / 日常 / 傲娇 / 平静四种语气按情境自动换；只在要用时开引擎，打游戏或内存紧张时自动让路 · 按群在「功能权限 → 语音消息」开关", "语音"],
     ["联网搜索", "不知道、拿不准或要最新消息时悄悄上网查（必应 + DuckDuckGo，自动过滤不相关结果），看完像本来就知道一样说；群友说「搜一下 XX」也会查 · 设置 → 联网搜索，按群在「功能权限 → 联网搜索」开关（默认开）", "搜索"],
+    ["查梗", "看到没见过的梗先翻自己的梗本子，再查萌娘百科，最后才上网；查到的记进梗本子下次直接用 · 按群在「功能权限 → 查梗」开关（默认开）", "梗"],
+    ["认真做文件", "群友请她写攻略 / 清单 / 计划 / 总结时，开思考认真写成文件发到群文件，每群每天有上限 · 按群在「功能权限 → 认真做文件」开启（默认关）", "文件"],
+    ["到点提醒 · 答应的事会兑现", "谁让她「X 点提醒我 / 半小时后叫我」她都记下来，到点在群里艾特 TA；她自己说了「等下发你」「明天帮你看看」也会记着，到点去兑现 · 设置 → 模式与内核", "活人感"],
     ["说话手感", "参考社区大肥鱼：句中停顿、结巴、改口、先蹦反应字，认真时收起玩笑，记得自己贴过的表情、戳过谁 · 设置 → 活人感", "活人感"],
   ] },
   { name: "B站生活", c: "#fb7299", items: [
@@ -502,6 +529,7 @@ const FEATURE_GROUPS = [
     ["点赞 / 弹幕 / 评论 / 动态", "做不做、说什么全看她自己的意愿，默认不限次数（设置 → B站生活 可加上限或关掉）；遇到风控立刻暂停", "互动"],
     ["学新梗", "从弹幕和热评里学会新梗，聊天时就能看懂、也会用", "梗"],
     ["B站刷到分享", "刷到特别好玩的视频分享到群里 · 按群在「功能权限 → B站刷到分享」开关（默认开）", "分享"],
+    ["B站画师图片", "全群共用UP名单，核对昵称后订阅；每20分钟分批检查，只推新图片和UP名，不附动态链接，不查历史 · 每群可在功能权限中关闭接收", "订阅"],
   ] },
   { name: "图像处理", c: "#b48cf2", items: [
     ["以图搜图", "Google 相似图检索，引用图片即可触发", "搜索"],
@@ -533,6 +561,11 @@ pages.features = {
 
 // ================= 指令大全 =================
 const COMMAND_GROUPS = [
+  { cat: "B站画师", name: "B站画师图片 · 全群共用名单", c: "#fb7299", hint: "先@机器人；首次添加只追新图，取消会同步到所有群", items: [
+    ["订阅UP", "核对UP名称后加入全局名单，不会关注B站账号，也不补旧图", "需 @机器人", ["@芙芙 订阅UP UID", "@芙芙 订阅画师 个人主页链接"]],
+    ["查看名单", "所有群看到同一份名单；条目较多可翻页", "全局", ["@芙芙 订阅名单", "@芙芙 订阅名单 第2页"]],
+    ["取消订阅", "全局取消这个UP，尚未发出的图片也停止发送", "全局", ["@芙芙 取消订阅 UID"]],
+  ] },
   { cat: "米游社账号", name: "米游社账号 · 扫码绑定与自动签到", c: "#38bdf8", hint: "所有指令都要先 @芙芙，不 @ 不会响应", items: [
     ["扫码绑定全部账号", "群里发米哈游通行证二维码，扫码后自动撤回；一次绑定通行证下原神/星铁/绝区零/崩坏3 全部账号，并开启每日自动签到", "需 @机器人", ["@芙芙 绑定账号"]],
     ["查看已绑定账号", "一张卡片列出全部游戏账号的昵称、UID、等级、服务器与签到状态", "需 @机器人", ["@芙芙 我的账号"]],
@@ -738,12 +771,12 @@ pages.logs = {
   mount(el) {
     el.innerHTML = `<div class="page-head"><h1>详情日志</h1><span class="sub" id="lgFile"></span><span class="grow"></span>
         <div class="seg" id="lgSrc"><button data-s="bot" class="on">机器人日志</button><button data-s="console">控制台输出</button></div>
-        <label class="check" style="margin-left:8px"><input type="checkbox" id="lgNap" checked>NapCat</label>
+        <label class="check" style="margin-left:8px"><input type="checkbox" id="lgNap" checked>QQ 接入端</label>
         <button class="btn sm" id="lgRestart">${icon("refresh")}重启机器人</button>
         <button class="btn sm" id="lgClear">${icon("trash")}清空</button></div>
       <div class="log-wrap with-nap" id="lgWrap">
         <div class="log-box" id="lgBot"></div>
-        <div style="display:flex;flex-direction:column;min-height:0" id="lgNapWrap"><div class="log-title">NapCat 日志 <span class="dim" id="lgNapFile"></span></div><div class="log-box grow" id="lgNapBox"></div></div>
+        <div style="display:flex;flex-direction:column;min-height:0" id="lgNapWrap"><div class="log-title">QQ 接入端日志 <span class="dim" id="lgNapFile"></span></div><div class="log-box grow" id="lgNapBox"></div></div>
       </div>`;
     $("#lgSrc").onclick = (e) => { const b = e.target.closest("[data-s]"); if (!b) return; this.source = b.dataset.s; $$("#lgSrc button").forEach((x) => x.classList.toggle("on", x === b)); this.pos = -1; $("#lgBot").innerHTML = ""; this.fetch(); };
     $("#lgNap").onchange = (e) => { this.showNap = e.target.checked; $("#lgNapWrap").style.display = this.showNap ? "" : "none"; $("#lgWrap").classList.toggle("with-nap", this.showNap); };
@@ -774,13 +807,16 @@ pages.logs = {
     try {
       const q = `source=${this.source}&pos=${this.pos}&npos=${this.showNap ? this.npos : -2}&nfile=${encodeURIComponent(this.nfile)}`;
       const d = await api(`/api/logs?${q}`);
+      const transportName = d.transport_name || "QQ 接入端";
+      $("#lgNap").parentElement.lastChild.textContent = transportName;
+      $("#lgNapWrap .log-title").firstChild.textContent = transportName + " 日志 ";
       if (!d.bot.exists && this.pos < 0) $("#lgBot").innerHTML = `<div class="dim">${d.bot.file} 还不存在——机器人启动后会生成。</div>`;
       this.pos = d.bot.pos; $("#lgFile").textContent = `logs/${d.bot.file}`;
       this.append($("#lgBot"), d.bot.lines, this.maxBot);
       if (this.showNap) {
         if (d.napcat.file !== this.nfile && this.nfile) $("#lgNapBox").innerHTML = "";
         this.nfile = d.napcat.file || ""; this.npos = d.napcat.pos;
-        $("#lgNapFile").textContent = d.napcat.file || "（没有找到 NapCat 日志）";
+        $("#lgNapFile").textContent = d.napcat.file || `（没有找到 ${transportName} 日志）`;
         this.append($("#lgNapBox"), d.napcat.lines, this.maxNap);
       }
     } catch (e) { /* ignore */ }
@@ -852,8 +888,8 @@ pages.about = {
         <div class="panel about-hero"><img src="/media/asset/avatar" alt=""><div class="grow"><div style="font-size:22px;font-weight:800">芙宁娜控制面板</div>
           <div class="muted">把机器人配置、运行状态、权限和数据查看集中在一个清晰的工作台中。</div></div><span class="tag ok">v${esc(PANEL.version)}</span></div>
         <div class="info-grid">
-          <div class="panel info-tile" style="--c:#ffd166"><div class="cap">版本</div><div class="val">v${esc(PANEL.version)}</div></div>
-          <div class="panel info-tile" style="--c:#6ad4ff"><div class="cap">QQ 机器人</div><div class="val">NoneBot2 + NapCat · QQ ${esc(o.bot_qq || "未设置")}</div></div>
+          <div class="panel info-tile" style="--c:#ffd166"><div class="cap">版本</div><div class="val">v${esc(PANEL.version)} · 圣芙蕾雅学园</div></div>
+          <div class="panel info-tile" style="--c:#6ad4ff"><div class="cap">QQ 机器人</div><div class="val">NoneBot2 + ${esc(o.transport_name || "NapCat")} · QQ ${esc(o.bot_qq || "未确认")}</div></div>
           <div class="panel info-tile" style="--c:#ec4899"><div class="cap">守护群聊</div><div class="val">${groups.length ? groups.map((g) => esc(g.name)).join(" / ") : "机器人上线后显示"}</div></div>
           <div class="panel info-tile" style="--c:#a78bfa"><div class="cap">AI 体系</div><div class="val">聊天 / 看图 / 搜图比对统一模型接口</div></div>
           <div class="panel info-tile" style="--c:#3ecf8e"><div class="cap">数据存储</div><div class="val">SQLite（WAL）· 面板修改即时生效</div></div>
@@ -867,7 +903,7 @@ pages.roles = {
   tab: "roles", roles: [], saved: "", sel: null, active: "", lore: [], loreRoles: [], loreSel: null, loreSaved: "",
   mount(el) {
     el.innerHTML = `<div class="page-head"><h1>角色管理</h1><span class="sub" id="rlSub"></span><span class="grow"></span>
-        <div class="seg" id="rlTab"><button data-t="roles" class="on">角色人格</button><button data-t="lore">共享设定</button></div></div>
+        <div class="seg" id="rlTab"><button data-t="roles" class="on">角色人格</button><button data-t="lore">共享设定</button><button data-t="blackbook">📕 芙芙的小本本</button></div></div>
       <div class="split" id="rlRoles">
         <div class="panel" style="display:flex;flex-direction:column;min-height:0;padding:8px">
           <div class="scroll grow"><div class="list" id="rlList"></div></div>
@@ -881,13 +917,27 @@ pages.roles = {
           <div class="row" style="padding:8px 4px 2px"><button class="btn sm grow" id="loNew">${icon("plus")}新建设定</button><button class="btn sm danger" id="loDel">${icon("trash")}</button></div>
         </div>
         <div class="panel panel-pad role-edit" id="loEdit"></div>
+      </div>
+      <div class="panel panel-pad" id="rlBlackBook" style="display:none;flex-direction:column;gap:12px;flex:1;min-height:0">
+        <div class="muted">芙芙在群里反杀顶嘴/开黄腔的群友时会自己往这里记一笔，以后聊天自动翻旧账嘲笑；你也可以手动帮她添几笔或删掉。</div>
+        <div class="row" style="gap:8px">
+          <input class="input" id="bbWho" placeholder="群友昵称或 QQ" style="flex:2">
+          <input class="input" id="bbNick" placeholder="芙芙给起的外号（如：白日梦小菜鸡）" style="flex:2">
+          <input class="input" id="bbEvent" placeholder="黑历史/罪状（如：跟本神顶嘴被反杀）" style="flex:3">
+          <button class="btn primary" id="bbAdd">记入小本本</button>
+        </div>
+        <div class="scroll grow" id="bbList" style="display:flex;flex-direction:column;gap:6px"></div>
       </div>`;
     $("#rlTab").onclick = async (e) => {
       const b = e.target.closest("[data-t]"); if (!b || b.dataset.t === this.tab) return;
       if (!(await this.leave())) return;
       this.tab = b.dataset.t; $$("#rlTab button").forEach((x) => x.classList.toggle("on", x === b));
-      $("#rlRoles").style.display = this.tab === "roles" ? "" : "none"; $("#rlLore").style.display = this.tab === "lore" ? "" : "none";
-      this.tab === "lore" ? this.loadLore() : this.load();
+      $("#rlRoles").style.display = this.tab === "roles" ? "" : "none";
+      $("#rlLore").style.display = this.tab === "lore" ? "" : "none";
+      $("#rlBlackBook").style.display = this.tab === "blackbook" ? "flex" : "none";
+      if (this.tab === "lore") this.loadLore();
+      else if (this.tab === "blackbook") this.loadBlackBook();
+      else this.load();
     };
     $("#rlList").onclick = (e) => { const it = e.target.closest("[data-i]"); if (it) { this.pull(); this.sel = +it.dataset.i; this.render(); } };
     $("#rlNew").onclick = () => { this.pull(); this.roles.push({ id: `role_${Date.now()}`, name: "新角色", prompt: "" }); this.sel = this.roles.length - 1; this.render(); $("#rlName").select(); };
@@ -926,13 +976,21 @@ pages.roles = {
         <div class="field"><label>角色 ID</label><input class="input mono" id="rlId" value="${esc(r.id)}"></div></div>
       <div class="field"><label>称呼 <span class="dim">群友怎么叫 TA，逗号分隔，第一个作为名字；留空取角色名「-」前面的部分</span></label><input class="input" id="rlAlias" placeholder="例如：胡桃, 胡堂主, 堂主" value="${esc(Array.isArray(r.aliases) ? r.aliases.join("，") : r.aliases || "")}"></div>
       <div class="field" style="flex:1;min-height:0"><label>人格设定 <span class="dim">只写性格与说话方式；通用规则和共享设定会自动追加</span></label><textarea class="textarea" id="rlPrompt">${esc(r.prompt)}</textarea></div>
-      <div class="save-bar" style="margin-top:0"><span class="muted grow" id="rlHint"></span>
+      <div class="save-bar" style="margin-top:0"><span class="muted grow" id="rlHint">保存后无需重启，下一条消息立即热更新生效</span>
+        <button class="btn" id="rlResetBuiltin" title="恢复为内置最新人设并立即热生效">同步内置最新人设</button>
         <button class="btn" id="rlActivate" ${r.id === this.active ? "disabled" : ""}>${r.id === this.active ? "已是当前角色" : "设为当前角色"}</button>
-        <button class="btn primary" id="rlSave">${icon("save")}保存</button></div>` : '<div class="empty">选择或新建一个角色</div>';
+        <button class="btn primary" id="rlSave">${icon("save")}保存（热更新）</button></div>` : '<div class="empty">选择或新建一个角色</div>';
     if (!r) return;
     const upd = () => { this.pull(); const dirty = this.dirty(); $("#rlHint").textContent = dirty ? "有未保存的修改" : ""; $("#rlHint").style.color = "var(--accent)"; };
     ["rlName", "rlId", "rlAlias", "rlPrompt"].forEach((id) => ($("#" + id).oninput = upd));
     $("#rlSave").onclick = () => this.save();
+    if ($("#rlResetBuiltin")) $("#rlResetBuiltin").onclick = async () => {
+      try {
+        const d = await post("/api/roles/reset", { role_id: r.id });
+        this.roles = d.roles; this.saved = JSON.stringify(d.roles);
+        toast("已同步内置最新人设并热更新生效", "success"); this.render();
+      } catch (e) { toastErr(e); }
+    };
     $("#rlActivate").onclick = async () => {
       try {
         if (this.dirty()) await this.save();
@@ -950,7 +1008,7 @@ pages.roles = {
   dirty() { this.pull(); return JSON.stringify(this.roles) !== this.saved; },
   async save() {
     this.pull();
-    try { await post("/api/roles", { roles: this.roles }); this.saved = JSON.stringify(this.roles); toast("角色已保存", "success"); this.render(); }
+    try { await post("/api/roles", { roles: this.roles }); this.saved = JSON.stringify(this.roles); toast("角色已保存并热更新生效（下一条消息起按新人设说话）", "success"); this.render(); }
     catch (e) { toastErr(e); throw e; }
   },
   async leave() {
@@ -960,6 +1018,34 @@ pages.roles = {
     if (r === true) { try { await this.save(); return true; } catch (e) { return false; } }
     if (r === "third") { this.roles = JSON.parse(this.saved); return true; }
     return false;
+  },
+  // ---- 芙芙的小本本 ----
+  async loadBlackBook() {
+    try {
+      const d = await api("/api/black_book");
+      const items = d.items || [];
+      const box = $("#bbList");
+      if (!box) return;
+      box.innerHTML = items.length ? items.map((x) => `<div class="list-item" style="justify-content:space-between">
+        <div class="li-main"><div class="li-title"><b>${esc(x.who || x.uid || "某群友")}</b> ${x.nickname ? `<span class="badge-cur">外号：${esc(x.nickname)}</span>` : ""}</div>
+        <div class="li-sub">${esc(x.event || "")} · ${esc(x.date || "")}</div></div>
+        <button class="btn sm danger" data-bb-del="${esc(x.id)}">${icon("trash")}</button></div>`).join("")
+        : '<div class="empty">小本本目前还是空的，等群友来招惹芙芙或者在上方手动记一笔吧~</div>';
+      box.onclick = async (e) => {
+        const b = e.target.closest("[data-bb-del]");
+        if (!b) return;
+        try { await api(`/api/black_book/${encodeURIComponent(b.dataset.bbDel)}`, { method: "DELETE" }); toast("已从小本本划掉", "success"); this.loadBlackBook(); } catch (err) { toastErr(err); }
+      };
+      if ($("#bbAdd")) $("#bbAdd").onclick = async () => {
+        const who = $("#bbWho").value.trim(), nickname = $("#bbNick").value.trim(), event = $("#bbEvent").value.trim();
+        if (!who || !(nickname || event)) return toast("请填写群友昵称，以及外号或黑历史", "warn");
+        try {
+          await post("/api/black_book", { who, nickname, event });
+          $("#bbWho").value = ""; $("#bbNick").value = ""; $("#bbEvent").value = "";
+          toast("已记入芙芙的小本本", "success"); this.loadBlackBook();
+        } catch (err) { toastErr(err); }
+      };
+    } catch (e) { toastErr(e); }
   },
   // ---- 共享设定 ----
   async loadLore() {
@@ -1106,7 +1192,7 @@ const SETTINGS_TABS = {
   game_query: { label: "游戏管理", html: () => `<div class="panel panel-pad"><h2>游戏战绩与图鉴</h2><p class="muted">按群开关在功能权限；账号、游戏开关、签到和指令集中在独立页面。</p><button class="btn primary" data-go="games">打开游戏管理</button></div>` },
   accounts: {
     label: "账号与角色",
-    html: () => `<div class="panel panel-pad"><div class="section-title">机器人账号<span class="hint">切换账号会写入 BOT_QQ、生成 NapCat 连接配置，并完全重启机器人</span></div>
+    html: () => `<div class="panel panel-pad"><div class="section-title">机器人账号<span class="hint" id="acTransportHint">正在读取接入方式</span></div>
         <div class="list" id="acList" style="gap:8px"></div></div>
       <div class="panel panel-pad"><div class="section-title">添加 / 修改账号</div>
         <div class="form-grid" style="grid-template-columns:1fr 1fr 1fr auto;align-items:end">
@@ -1118,6 +1204,9 @@ const SETTINGS_TABS = {
         <button class="btn" data-login="google">登录 Google 账号</button><button class="btn" data-login="x">登录 X 账号</button></div>`,
     async load(el) {
       const d = await api("/api/accounts");
+      $("#acTransportHint", el).textContent = d.transport_name === "SnowLuma"
+        ? "当前QQ号由SnowLuma登录助手确认绑定；此处仅编辑人设资料，不会自动切换或尝试登录"
+        : "切换账号会写入BOT_QQ、生成NapCat连接配置并完全重启机器人";
       const roleName = Object.fromEntries(d.roles.map((r) => [r.id, r.name]));
       $("#acRole", el).innerHTML = '<option value="">（内置人格）</option>' + d.roles.map((r) => `<option value="${esc(r.id)}">${esc(r.name)}</option>`).join("");
       $("#acList", el).innerHTML = d.accounts.length ? d.accounts.map((a) => `<div class="acct ${String(a.qq) === d.bot_qq ? "cur" : ""}">
@@ -1125,7 +1214,8 @@ const SETTINGS_TABS = {
           <div class="grow"><div class="li-title">${esc(a.nickname || "未命名")} <span class="dim mono">${a.qq}</span>${String(a.qq) === d.bot_qq ? '<span class="badge-cur">使用中</span>' : ""}</div>
           <div class="li-sub">角色：${esc(roleName[a.role_id] || "内置人格")}</div></div>
           <button class="btn sm ghost" data-ac="edit" data-qq="${a.qq}">编辑</button>
-          ${String(a.qq) === d.bot_qq ? "" : `<button class="btn sm" data-ac="use" data-qq="${a.qq}">选用此号并重启</button><button class="btn sm danger" data-ac="del" data-qq="${a.qq}">${icon("trash")}</button>`}
+          ${d.transport_name === "SnowLuma" ? "" : String(a.qq) === d.bot_qq ? "" : `<button class="btn sm" data-ac="use" data-qq="${a.qq}">选用此号并重启</button>`}
+          ${String(a.qq) === d.bot_qq ? "" : `<button class="btn sm danger" data-ac="del" data-qq="${a.qq}">${icon("trash")}</button>`}
         </div>`).join("") : `<div class="empty">还没有保存账号${d.bot_qq ? `（当前 BOT_QQ：${d.bot_qq}）` : ""}</div>`;
       el.onclick = async (e) => {
         const b = e.target.closest("[data-ac]");
@@ -1398,6 +1488,22 @@ pages.bili = {
           <div class="panel panel-pad bl-feed-wrap"><div class="section-title">动态流<span class="hint">她刷 B 站时的每一步，3 秒刷新</span></div><div class="bl-feed" id="blFeed"></div></div>
         </div>
         <div class="bl-stats" id="blStats"></div>
+        <section class="panel panel-pad" data-feature="bili_pics" aria-labelledby="blPicTitle">
+          <div class="section-title" id="blPicTitle">B站画师图片<span class="hint">一份全局名单 · 各群可独立关接收</span></div>
+          <div class="row wrap" style="margin:12px 0">
+            <input class="input grow" id="blPicUid" aria-label="UP的UID或B站个人主页链接" placeholder="UP的UID或个人主页链接">
+            <button class="btn primary" id="blPicAdd">加入全局名单</button>
+          </div>
+          <div class="muted" id="blPicStatus" role="status" aria-live="polite">加载名单中…</div>
+          <div id="blPicList" style="margin:12px 0;max-height:260px;overflow:auto"></div>
+          <div class="row wrap">
+            <label class="row"><input type="checkbox" id="blPicEnabled" checked>启用图片订阅</label>
+            <label class="row">检查间隔 <input class="input" id="blPicInterval" type="number" min="5" max="1440" value="20" style="width:85px"> 分钟</label>
+            <button class="btn" id="blPicSave">保存</button><button class="btn" id="blPicCheck">检查新图</button>
+            <button class="btn ghost" id="blPicRetry">重试未确认的发送</button>
+          </div>
+          <div class="li-sub" style="margin-top:8px">首次订阅不补旧图；推送只带UP名。分批巡检，UP较多时会排队，不做历史查图或角色识别。</div>
+        </section>
         <div class="panel panel-pad">
           <div class="row" style="margin-bottom:12px"><div class="seg" id="blTabs">
             <button data-t="watched" class="on">看过的视频</button><button data-t="posts">发过的</button><button data-t="slang">梗库与热搜</button></div>
@@ -1406,6 +1512,25 @@ pages.bili = {
         </div>
       </div>`;
     $("#blTabs", el).onclick = (e) => { const b = e.target.closest("[data-t]"); if (!b) return; this.tab = b.dataset.t; $$("#blTabs button", el).forEach((x) => x.classList.toggle("on", x === b)); this.renderTab(); };
+    $("#blPicAdd", el).onclick = () => this.addPic();
+    $("#blPicUid", el).onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); this.addPic(); } };
+    for (const id of ["blPicEnabled", "blPicInterval"]) { const input = $(`#${id}`, el); input.onchange = input.oninput = () => { this.picDirty = true; }; }
+    $("#blPicSave", el).onclick = async () => {
+      try { await post("/api/bili-pics/settings", { enabled: $("#blPicEnabled").checked, interval_minutes: Number($("#blPicInterval").value) }); this.picDirty = false; toast("图片订阅设置已保存"); this.refresh(); } catch (e) { toastErr(e); }
+    };
+    $("#blPicCheck", el).onclick = async () => {
+      try { const r = await post("/api/bili-pics/check", {}); toast(`已安排检查 ${r.queued} 个UP，机器人下一轮分批执行`); } catch (e) { toastErr(e); }
+    };
+    $("#blPicRetry", el).onclick = async () => {
+      if (!await confirmBox("重试未确认的发送", "有些发送上次没有收到回执，可能其实已送达。重试可能重复发图；确定要重试所有群尚未确认或失败的发送吗？", { ok: "确认重试" })) return;
+      try { const r = await post("/api/bili-pics/retry", { confirmed: true }); toast(`已安排重试 ${r.retried} 份`); this.refresh(); } catch (e) { toastErr(e); }
+    };
+    $("#blPicList", el).onclick = async (e) => {
+      const b = e.target.closest("[data-remove-up]"); if (!b) return;
+      if (!await confirmBox("取消全局订阅", `取消「${b.dataset.name}」后，所有群都不再接收这个UP的新图。`, { ok: "取消订阅", danger: true })) return;
+      b.disabled = true;
+      try { await api(`/api/bili-pics/subscriptions/${encodeURIComponent(b.dataset.removeUp)}`, { method: "DELETE" }); toast("已取消，所有群同步"); this.refresh(); } catch (err) { b.disabled = false; toastErr(err); }
+    };
     $("#blSurf", el).onclick = () => this.act("surf", { keyword: $("#blKw", el).value.trim() });
     $("#blDyn", el).onclick = async () => { if (await confirmBox("发动态", "让她按今天的经历想一条动态（她也可能想了想决定不发）。", { ok: "去想" })) this.act("dynamic"); };
     $("#blReply", el).onclick = () => this.act("replies");
@@ -1449,7 +1574,7 @@ pages.bili = {
     $("#blLogin").innerHTML = st.logged_in ? "退出登录" : `${icon("plus")}扫码登录`;
     $("#blLogin").className = st.logged_in ? "btn ghost" : "btn primary";
     $("#blSurf").disabled = $("#blDyn").disabled = $("#blReply").disabled = !st.logged_in;
-    this.renderLive(); this.renderFeed(); this.renderStats(); this.renderTab();
+    this.renderLive(); this.renderFeed(); this.renderStats(); this.renderPics(); this.renderTab();
   },
   renderLive() {
     const d = this.d, lv = d.live || {}, v = lv.video, [label, cls] = BILI_STATE[lv.state] || BILI_STATE.idle;
@@ -1470,6 +1595,25 @@ pages.bili = {
           <div class="muted">${last ? `上次在 ${biliAgo(last.ts, d.now)} 看了《${esc(last.title)}》` : "还没刷过视频"} · 自动时段 ${esc(d.hours)}</div>
           <div class="muted" style="margin-top:6px">点右上角「刷一下」让她现在就去；输入关键词可以指定她搜什么。</div></div></div>${req}`;
     }
+  },
+  async addPic() {
+    const button = $("#blPicAdd"), input = $("#blPicUid");
+    if (button.disabled) return;
+    const target = input.value.trim();
+    if (!target) { toast("先填UP的UID或主页链接", "info"); return; }
+    button.disabled = true; button.textContent = "核对UP中…";
+    try { const r = await post("/api/bili-pics/subscriptions", { target }); if (input.value.trim() === target) input.value = ""; toast(`${r.created ? "已订阅" : "已经在名单里"}：${r.name}，所有群同步`); this.refresh(); }
+    catch (e) { toastErr(e); }
+    finally { button.disabled = false; button.textContent = "加入全局名单"; }
+  },
+  renderPics() {
+    const p = this.d.pics;
+    if (!p) { $("#blPicStatus").textContent = "重开控制面板后可查看全局订阅名单"; return; }
+    if (!this.picDirty) { $("#blPicEnabled").checked = !!p.enabled; $("#blPicInterval").value = p.interval_minutes; }
+    const rows = p.subscriptions || [];
+    $("#blPicStatus").textContent = `全群共用 ${rows.length} 个UP · 每${p.interval_minutes}分钟分批检查 · 待发送 ${p.pending} 份 · 结果待确认 ${p.uncertain} 份 · 失败 ${p.failed} 份` + (!p.enabled ? " · 图片订阅已暂停" : "") + (p.halted ? ` · B站请求已暂停：${p.halt_reason}` : "");
+    $("#blPicRetry").disabled = !((p.uncertain || 0) + (p.failed || 0));
+    $("#blPicList").innerHTML = rows.length ? rows.map((r) => `<div class="row" style="padding:8px 0;border-bottom:1px solid var(--line)"><div class="grow"><b>${esc(r.name)}</b> <span class="muted mono">UID ${esc(r.uid)}</span><div class="li-sub">${r.last_check ? `上次检查 ${biliAgo(r.last_check, p.now)}` : "等待首次检查"}${r.last_error ? ` · ${esc(r.last_error)}` : ""}</div></div><button class="btn sm ghost" data-remove-up="${esc(r.uid)}" data-name="${esc(r.name)}" aria-label="取消订阅${esc(r.name)}">取消订阅</button></div>`).join("") : '<div class="empty">还没有UP。填入UID或主页链接，或在群里艾特她说「订阅UP UID」</div>';
   },
   renderFeed() {
     const a = this.d.activity || [];

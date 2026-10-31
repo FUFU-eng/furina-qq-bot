@@ -138,6 +138,10 @@ def napcat_running() -> bool:
     return napcat.is_running()
 
 
+def start_qq_transport(qq=None):
+    return napcat.start(qq)
+
+
 def stop_napcat() -> None:
     napcat.stop()
 

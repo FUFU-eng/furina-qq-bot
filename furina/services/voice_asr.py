@@ -114,27 +114,83 @@ async def transcribe(path: str, timeout: float = 90.0) -> str:
     return text
 
 
+MAX_WAV_BYTES = 4 * 1024 * 1024  # wav 16k 约 60 秒以上就不听
+
+
+def _local_file(value) -> str:
+    """协议端给的 file/path 如果是本机现成的文件就返回路径；网址、缓存标识一律返回空。"""
+    p = str(value or "").strip()
+    if not p or p.lower().startswith(("http://", "https://", "base64://", "data:")):
+        return ""
+    if p.lower().startswith("file://"):
+        from urllib.parse import unquote, urlsplit
+        p = unquote(urlsplit(p).path)
+        if len(p) > 2 and p[0] == "/" and p[2] == ":":
+            p = p[1:]
+    return p if os.path.isfile(p) else ""
+
+
+def _save_wav_b64(b64: str) -> str:
+    """SnowLuma 的 get_record(out_format=wav) 把转好的音频放在 base64 里：落成临时 wav；太长/坏数据返回空。"""
+    import base64
+    import binascii
+    import tempfile
+
+    raw = str(b64 or "").strip()
+    if raw.lower().startswith("base64://"):
+        raw = raw[9:]
+    try:
+        data = base64.b64decode(raw, validate=False)
+    except (binascii.Error, ValueError):
+        return ""
+    if not data:
+        return ""
+    if len(data) > MAX_WAV_BYTES:
+        logger.info("[听语音] 语音太长，不听")
+        return ""
+    fd, path = tempfile.mkstemp(prefix="furina_asr_", suffix=".wav")
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return path
+
+
 async def hear_segment(bot, data: dict) -> str:
-    """QQ 语音段 → 文字：先让 NapCat 转成 wav 拿到本地文件，再转写。"""
+    """QQ 语音段 → 文字：拿到本地 wav 再转写。
+
+    NapCat：语音段自带本地 path，或 get_record 返回本地 file；
+    SnowLuma：语音段只有 file/url，get_record(out_format=wav) 的 file 是下载地址，转好的 wav 在 base64 字段里。
+    """
     ok, why = available()
     if not ok:
         logger.info(f"[听语音] 这条没听：{why}")
         return ""
     file = str((data or {}).get("file") or "")
-    path = str((data or {}).get("path") or "")
-    if not (path and os.path.isfile(path)) and file:
+    path = _local_file((data or {}).get("path"))
+    temp = ""
+    if not path and file:
         try:
             res = await bot.call_api("get_record", file=file, out_format="wav")
-            path = str((res or {}).get("file") or "")
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[听语音] 取语音文件失败: {e}")
             return ""
-    if not path or not os.path.isfile(path):
+        res = res if isinstance(res, dict) else {}
+        if res.get("base64"):
+            temp = path = await asyncio.to_thread(_save_wav_b64, res.get("base64"))
+        else:
+            path = _local_file(res.get("file"))
+    if not path:
         return ""
     try:
-        if os.path.getsize(path) > 4 * 1024 * 1024:  # wav 16k 约 60 秒以上
-            logger.info("[听语音] 语音太长，不听")
+        try:
+            if os.path.getsize(path) > MAX_WAV_BYTES:
+                logger.info("[听语音] 语音太长，不听")
+                return ""
+        except OSError:
             return ""
-    except OSError:
-        return ""
-    return await transcribe(path)
+        return await transcribe(path)
+    finally:
+        if temp:
+            try:
+                os.remove(temp)
+            except OSError:
+                pass

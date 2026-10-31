@@ -15,7 +15,7 @@ import threading
 import time
 from pathlib import Path
 
-from furina.core import paths
+from furina.core import paths, qq_transport
 
 from . import envfile, health, napcat, winproc
 
@@ -54,6 +54,66 @@ def _trim(path: Path, limit: int = 5 * 1024 * 1024) -> None:
         path.unlink()
     except OSError:
         pass
+
+
+_TRIAL_CODE = (
+    "import os, sys; os.environ['FURINA_TRIAL_LOAD'] = '1'; sys.argv = ['bot.py']; "
+    "import bot; bot.create_app(); print('FURINA_TRIAL_OK')"
+)
+
+
+def _known_plugin_failures() -> set[str] | None:
+    """正式运行的机器人启动时记下的「本来就加载不了」的插件（bot.py 写 data/plugin_load.json）。"""
+    import json
+
+    try:
+        with open(paths.ROOT / "data" / "plugin_load.json", encoding="utf-8") as f:
+            return set(json.load(f).get("failed") or [])
+    except (OSError, ValueError):
+        return None
+
+
+def _failure_lines(out: str, names: list[str]) -> list[str]:
+    lines = out.splitlines()
+    keep = []
+    for i, line in enumerate(lines):
+        if any(f"furina.plugins.{n}" in line for n in names) and ("Failed" in line or "失败" in line):
+            keep.extend(lines[i:i + 1])
+        elif line and not line.startswith(" ") and ("Error" in line or "Exception" in line):
+            keep.append(line)
+    return keep[-10:]
+
+
+def trial_load(timeout: float = 120) -> tuple[bool, str]:
+    """重启前先试加载：另起一个 Python 把所有插件 import 一遍（不监听端口、不连 NapCat）。
+
+    新代码有语法错误 / 导入错误时返回 (False, 报错末尾)，调用方就不杀旧机器人，免得改坏代码后机器人起不来。
+    开关 BOT_TRIAL_LOAD（默认开）。
+    """
+    if str(envfile.get("BOT_TRIAL_LOAD", "true")).strip().lower() in ("0", "false", "no", "off"):
+        return True, "跳过"
+    env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    try:
+        r = subprocess.run([python_exe(), "-X", "utf8", "-c", _TRIAL_CODE], cwd=str(paths.ROOT), env=env,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+                           creationflags=winproc.NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return True, f"试加载超过 {int(timeout)} 秒，按通过处理"
+    except Exception as exc:  # noqa: BLE001  试加载本身起不来不该挡住重启
+        return True, f"试加载没跑起来（{exc}），按通过处理"
+    out = (r.stdout or "") + (r.stderr or "")
+    if r.returncode == 0 and "FURINA_TRIAL_OK" in out:
+        failed = set()
+        for line in out.splitlines():
+            if line.startswith("FURINA_TRIAL_FAILED="):
+                failed = {x for x in line.split("=", 1)[1].strip().split(",") if x}
+        known = _known_plugin_failures()
+        new = sorted(failed - known) if known is not None else sorted(failed & {"chat"})
+        if not new:
+            return True, "通过"
+        return False, f"这些插件加载失败：{', '.join(new)}\n" + "\n".join(_failure_lines(out, new))
+    tail = "\n".join(line for line in out.strip().splitlines()[-12:])
+    return False, tail[-1500:] or f"退出码 {r.returncode}"
 
 
 def find_bot_processes() -> list[tuple[int, float]]:
@@ -135,18 +195,18 @@ class Controller:
     def check_once(self) -> dict:
         gen = self.generation
         qq = envfile.get("BOT_QQ", "")
-        nap = winproc.port_open(napcat.webui_port())
+        gateway = napcat.is_running()
         procs = find_bot_processes()
         port = winproc.port_open(bot_port())
-        nonebot = bool(procs)  # 只认 v2 的 bot.py；端口被别的程序（如旧版机器人）占着不算
-        h = health.query_health(qq)
+        nonebot = bool(procs)  # 只认 v2 的 bot.py；端口被别的程序占着不算
+        h = health.query_health("" if qq_transport.uses_snowluma() else qq)
         napcat.groups.refresh()
         if gen != self.generation or self.busy:
             return self.state
         prev = self.state["health"]["state"]
-        running = nap and nonebot
+        running = gateway and nonebot
         started = min((t for _, t in procs if t), default=None) if procs else self.state.get("started_at")
-        self.state.update(running=running, napcat=nap, nonebot=nonebot, port_conflict=port and not procs,
+        self.state.update(running=running, napcat=gateway, nonebot=nonebot, port_conflict=port and not procs,
                           health=h.to_dict(), started_at=started if running else None, checked_at=time.time())
         if prev != h.state:
             self.emit("success" if h.state == "online" else "warn", "[连接状态] " + h.detail)
@@ -190,18 +250,32 @@ class Controller:
 
     def restart(self, with_napcat: bool = False) -> bool:
         def work():
+            if find_bot_processes():
+                self.emit("info", "[系统] 先试加载新代码...")
+                ok, msg = trial_load()
+                if not ok:
+                    self.emit("error", "[错误] 新代码加载失败，旧机器人保持运行，没有重启：\n" + msg, toast=True)
+                    return
             self.emit("info", "[系统] 正在重启机器人...")
-            if with_napcat:
+            if with_napcat and not qq_transport.uses_snowluma():
                 self._stop_work()
             else:
                 self._kill_bot()
-                self.emit("info", "[系统] 仅重启 NoneBot，保留 NapCat 登录会话")
+                self.emit("info", f"[系统] 仅重启 NoneBot，保留 {('SnowLuma接入端/QQ会话' if qq_transport.uses_snowluma() else 'NapCat/QQ会话')}")
             time.sleep(2)
             self._start_work()
         return self._run("重启", work)
 
     def restart_napcat_for_login(self) -> bool:
-        """登录助手里的「重启 NapCat」：只重启机器人用的 NapCat/QQ；先快速登录（免扫码），不行再出新二维码。"""
+        """Compatibility action: on SnowLuma, start only its local WebUI; account selection remains manual."""
+        if qq_transport.uses_snowluma():
+            def start_snowluma():
+                if napcat.is_running():
+                    self.emit("info", f"[SnowLuma] 本地管理页已运行：{napcat.webui_url()}；请手动选择目标QQ客户端并加载")
+                    return
+                napcat.start(None)
+                self.emit("success", f"[SnowLuma] 本地管理页已启动：{napcat.webui_url()}；不会自动登录或加载任何QQ号")
+            return self._run("启动SnowLuma管理页", start_snowluma)
         qq = envfile.get("BOT_QQ", "")
 
         def work():
@@ -238,23 +312,33 @@ class Controller:
             time.sleep(0.3)
 
     def _start_work(self) -> None:
-        self.emit("info", "[系统] 正在启动机器人（保留已有 QQ 登录会话）...")
+        snow = qq_transport.uses_snowluma()
+        self.emit("info", f"[系统] 正在启动机器人与{'SnowLuma本地接入端' if snow else 'NapCat'}...")
         qq = envfile.get("BOT_QQ", "")
-        if not qq.isdigit():
+        if not qq.isdigit() and not snow:
             raise ValueError("还没有设置机器人 QQ（设置 → 账号与角色）")
         if napcat.is_running():
-            h = health.query_health(qq)
-            if h.state == "mismatch":
+            h = health.query_health("" if snow else qq)
+            if h.state == "mismatch" and not snow:
                 raise RuntimeError(h.detail + "；请在「账号与角色」里明确切换账号")
-            self.emit("info", "[系统] 复用已有 NapCat；未登录时请在登录助手里扫码，不自动重登")
+            self.emit("info", f"[系统] 复用已有{'SnowLuma' if snow else 'NapCat'}接入端；{'需在SnowLuma本地WebUI手动选择QQ并加载，未确认前不处理消息' if snow else '不会自动重登'}")
         else:
-            napcat.start(qq)
-            time.sleep(8)
+            napcat.start(None if snow else qq)
+            time.sleep(3 if snow else 8)
+        if snow:
+            confirmed = envfile.get("SNOWLUMA_ACCOUNT_CONFIRMED", "false").lower() in ("1", "true", "yes", "on")
+            if not confirmed:
+                self.emit("success", f"[SnowLuma] 本地接入端已运行：{napcat.webui_url()}。请手动选择QQ、加载并在登录助手确认；确认前机器人服务保持停止")
+                return
+            live = health.query_health("")
+            if live.state != "online" or not qq or live.user_id != qq:
+                self.emit("warn", f"[SnowLuma] 当前连接账号 {live.user_id or '未连接'} 与已确认 BOT_QQ 不一致或未上线；保持机器人服务停止，请重新核对并确认")
+                return
         gen = self.generation
         procs = find_bot_processes()
         if procs:
             self.emit("info", "[系统] 检测到机器人服务已运行，不重复启动")
-            threading.Thread(target=self._monitor_login, args=(qq, gen, 120), daemon=True).start()
+            threading.Thread(target=self._monitor_login, args=("" if snow else qq, gen, 120), daemon=True).start()
             return
         if winproc.port_open(bot_port()):
             raise RuntimeError(f"{bot_port()} 端口被其它程序占用（可能是旧版机器人还在运行），请先停止它")
@@ -278,7 +362,7 @@ class Controller:
             raise RuntimeError("机器人启动后立即退出，请看「详情日志」里的 console.log 报错")
         else:
             self.emit("warn", f"[系统] 机器人进程已拉起，但 {bot_port()} 端口尚未就绪，请稍候查看日志")
-        threading.Thread(target=self._monitor_login, args=(qq, gen, 120), daemon=True).start()
+        threading.Thread(target=self._monitor_login, args=("" if snow else qq, gen, 120), daemon=True).start()
 
     def _stop_work(self) -> None:
         self.emit("info", "[系统] 正在停止机器人...")
@@ -292,15 +376,19 @@ class Controller:
         self.emit("success", "[系统] 机器人已停止", toast=True)
 
     def _monitor_login(self, qq: str, gen: int, timeout: float) -> None:
-        """只有“在线 + 账号一致”才算登录成功；缓存的 UIN 不算。"""
+        """Only report a live OneBot connection. SnowLuma accounts require explicit local confirmation."""
+        snow = qq_transport.uses_snowluma()
         deadline = time.monotonic() + timeout
         h = health.Health("unknown", "")
         while time.monotonic() < deadline:
             if gen != self.generation:
                 return
-            h = health.query_health(qq)
+            h = health.query_health("" if snow else qq)
             if h.state == "online":
-                self.emit("success", f"[系统] NapCat 已确认 QQ {qq} 在线")
+                if snow and (not envfile.get("SNOWLUMA_ACCOUNT_CONFIRMED", "false").lower() in ("1", "true", "yes", "on") or h.user_id != envfile.get("BOT_QQ", "")):
+                    self.emit("warn", f"[SnowLuma] 已检测到账号 {h.user_id}，请在登录助手确认这是预定机器人号；确认前群聊处理处于保护锁定")
+                else:
+                    self.emit("success", f"[系统] 已确认 {('SnowLuma' if snow else 'NapCat')} QQ {h.user_id or qq} 在线")
                 self.poke()
                 return
             if h.state == "mismatch":
@@ -311,11 +399,14 @@ class Controller:
             self.emit("warn", f"[登录检查] 未能确认 QQ {qq} 在线；点左下角状态打开「登录助手」，用该账号扫码即可", toast=True)
 
     def test_connection(self) -> dict:
+        snow = qq_transport.uses_snowluma()
         qq = envfile.get("BOT_QQ", "")
-        h = health.query_health(qq)
+        h = health.query_health("" if snow else qq)
         ready = bool(find_bot_processes()) and winproc.port_open(bot_port())
         detail = h.detail + ("" if ready else "\nNoneBot 服务未运行或尚未就绪。")
-        return {"ok": h.state == "online" and ready, "headline": "状态检查" if h.state == "online" and ready else "连接未就绪",
+        if snow and h.state == "online" and h.user_id != qq:
+            detail += "\n这个账号尚未确认；请在登录助手检查身份并确认后才开放聊天。"
+        return {"ok": h.state == "online" and ready and (not snow or h.user_id == qq), "headline": "状态检查" if h.state == "online" and ready and (not snow or h.user_id == qq) else "连接未就绪",
                 "detail": detail}
 
 

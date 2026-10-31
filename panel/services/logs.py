@@ -1,4 +1,4 @@
-"""增量读取日志：机器人 logs/bot.log（或 console.log）与 NapCat 最新的文件日志。
+"""增量读取日志：机器人 logs/bot.log（或 console.log）与当前 QQ 接入端的最新文件日志。
 
 网页带着上次的读取位置来取新内容；文件变小（轮转）就从头读，首次只读末尾一段。
 """
@@ -8,12 +8,17 @@ import os
 import re
 from pathlib import Path
 
-from furina.core import paths
+from furina.core import paths, qq_transport
 
 from . import napcat
 
 SOURCES = {"bot": paths.LOG_DIR / "bot.log", "console": paths.LOG_DIR / "console.log"}
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def transport_name() -> str:
+    """Human-readable name of the currently selected QQ transport."""
+    return "SnowLuma" if qq_transport.uses_snowluma() else "NapCat"
 
 
 def _level_bot(line: str) -> str:
@@ -69,8 +74,9 @@ def bot_lines(source: str, pos: int | None) -> dict:
             "lines": [{"t": _level_bot(x), "s": x} for x in lines if x.strip()]}
 
 
-def latest_napcat_log() -> Path | None:
-    d = napcat.log_dir()
+def latest_transport_log() -> Path | None:
+    """Return the newest file log from the currently selected QQ transport."""
+    d = napcat.log_dir()  # Compatibility service resolves SnowLuma vs NapCat dynamically.
     try:
         files = [d / x for x in os.listdir(d) if x.lower().endswith(".log")] if d else []
         return max(files, key=lambda p: p.stat().st_mtime) if files else None
@@ -78,8 +84,13 @@ def latest_napcat_log() -> Path | None:
         return None
 
 
+def latest_napcat_log() -> Path | None:
+    """Backward-compatible name; the log directory follows the active transport."""
+    return latest_transport_log()
+
+
 def napcat_lines(name: str | None, pos: int | None) -> dict:
-    path = latest_napcat_log()
+    path = latest_transport_log()
     if path is None:
         return {"file": None, "pos": 0, "lines": []}
     if name != path.name:
@@ -94,8 +105,11 @@ def napcat_lines(name: str | None, pos: int | None) -> dict:
 
 
 def end_positions() -> dict:
-    """「清空日志」：返回各文件当前末尾位置，之后只显示新内容。"""
+    """Return tail positions for app and active QQ transport logs."""
     res = {k: (p.stat().st_size if p.exists() else 0) for k, p in SOURCES.items()}
-    nap = latest_napcat_log()
-    res["napcat"] = {"file": nap.name if nap else None, "pos": nap.stat().st_size if nap else 0}
+    transport_log = latest_transport_log()
+    # Keep the historical API key for existing panel clients; its path is the active transport.
+    res["napcat"] = {"file": transport_log.name if transport_log else None,
+                     "pos": transport_log.stat().st_size if transport_log else 0}
+    res["transport_name"] = transport_name()
     return res

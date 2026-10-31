@@ -24,6 +24,8 @@ KINDS = [
     ("jm", "JM 下载", "#f87171"), ("miyoushe_sign", "米游社签到", "#38bdf8"), ("game_query", "游戏战绩与图鉴", "#6ad4ff"),
     ("proactive", "冷场开话题", "#a3e635"), ("voice", "语音消息", "#f472b6"), ("bili_share", "B站分享", "#fb7299"),
     ("websearch", "联网搜索", "#34d399"), ("miss", "惦记群友", "#f9a8d4"), ("pic_inbox", "收图筛选", "#7dd3fc"),
+    ("memewiki", "查梗", "#facc15"), ("maker", "做文件", "#a78bfa"),
+    ("bili_pics", "B站画师图片", "#fb7299"),
 ]
 
 
@@ -760,3 +762,109 @@ def save_mihoyo_settings(body: dict) -> dict:
 
 def delete_mihoyo_account(qq: str) -> bool:
     raise ValueError("旧账号删除接口已停用。请在 GsCore 官方控制台管理新账号；旧资料保留供回滚。")
+
+
+# ---------------- 角色内置人设重置 & 芙芙的小本本 ----------------
+def reset_role_prompt(role_id: str) -> dict:
+    """把指定角色的提示词恢复为代码内置最新版并立即写入 SQLite（热生效）。"""
+    import ast
+    from furina.core import roles as _roles
+    rid = str(role_id or "furina").strip() or "furina"
+    builtin_prompt = ""
+    builtin_name = ""
+    if rid in ("furina", "furina_black"):
+        rid = "furina"
+        try:
+            src = (paths.ROOT / "furina" / "plugins" / "chat" / "persona.py").read_text(encoding="utf-8")
+            tree = ast.parse(src)
+            for node in tree.body:
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        if isinstance(t, ast.Name) and t.id == "PERSONA":
+                            builtin_prompt = ast.literal_eval(node.value)
+                            builtin_name = "芙宁娜"
+                            break
+        except Exception:
+            pass
+    if not builtin_prompt:
+        for b in getattr(_roles, "_BUILTIN_ROLES", ()):
+            if b["id"] == rid:
+                builtin_prompt = b["prompt"]
+                builtin_name = b["name"]
+                break
+    if not builtin_prompt:
+        raise ValueError(f"未找到角色 {rid} 的内置人设")
+    cur_roles = roles()
+    found = False
+    for item in cur_roles:
+        if item.get("id") == rid:
+            item["prompt"] = builtin_prompt
+            if builtin_name:
+                item["name"] = builtin_name
+            found = True
+    if not found:
+        cur_roles.insert(0, {"id": rid, "name": builtin_name or "芙宁娜", "prompt": builtin_prompt, "triggers": [], "lore_ids": []})
+    save_roles(cur_roles)
+    return {"id": rid, "name": builtin_name or "芙宁娜", "prompt": builtin_prompt}
+
+
+def black_book() -> list[dict]:
+    from furina.plugins.chat import fun_features
+    return fun_features.list_black_book()
+
+
+def add_black_book(who: str, nickname: str, event: str, gid: str = "", uid: str = "") -> dict:
+    from furina.plugins.chat import fun_features
+    return fun_features.add_black_book_entry(who=who, nickname=nickname, event=event, gid=gid, uid=uid)
+
+
+def delete_black_book(entry_id: str) -> bool:
+    from furina.plugins.chat import fun_features
+    return fun_features.delete_black_book_entry(entry_id)
+
+
+# ---------------- 全群共用的B站画师图片订阅 ----------------
+def bili_pics_data() -> dict:
+    from furina.services.bilibili import pictures
+    return pictures.snapshot()
+
+
+def save_bili_pics(body: dict) -> dict:
+    updates = {}
+    if set(body) - {"enabled", "interval_minutes"}:
+        raise ValueError("图片订阅设置字段不正确")
+    if "enabled" in body:
+        if not isinstance(body["enabled"], bool):
+            raise ValueError("启用状态必须是开或关")
+        updates["BILI_PICS_ENABLED"] = "true" if body["enabled"] else "false"
+    if "interval_minutes" in body:
+        value = body["interval_minutes"]
+        if isinstance(value, bool) or not isinstance(value, int) or not 5 <= value <= 1440:
+            raise ValueError("检查间隔请填5到1440之间的整数分钟")
+        updates["BILI_PICS_INTERVAL_MINUTES"] = str(value)
+    if updates:
+        envfile.set_values(updates)
+    return bili_pics_data()
+
+
+def add_bili_pic(target: str) -> dict:
+    import asyncio
+    from furina.services.bilibili import pictures
+    return asyncio.run(pictures.subscribe(target))
+
+
+def remove_bili_pic(uid: str) -> bool:
+    from furina.services.bilibili import pictures
+    return pictures.unsubscribe(pictures.parse_uid(uid))
+
+
+def check_bili_pics() -> int:
+    from furina.services.bilibili import pictures
+    return pictures.make_due()
+
+
+def retry_bili_pics(confirmed: bool = False) -> int:
+    from furina.services.bilibili import pictures
+    if confirmed is not True:
+        raise ValueError("重试可能重复发图，请先明确确认")
+    return pictures.retry_unconfirmed()

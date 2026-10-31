@@ -123,14 +123,9 @@ def _unlink_quietly(path: str) -> None:
         pass
 
 
-async def send_eagle_images(send, count: int, tag: str = "cmd") -> int:
-    """从 Eagle 图库随机取图并发送，返回发送张数（0=没取到图）。
-
-    - 读图库放到线程里，避免大图库 listdir/读图卡住事件循环；
-    - 临时文件名带 uuid，避免同一秒内两次请求互相覆盖；
-    - 发送成功后立即删临时文件；发送异常（可能仍在上传）时 5 分钟后再删，不再永久残留。
-    """
-    img_list = await asyncio.to_thread(_pick_eagle_image, count)
+async def send_eagle_images(send, count: int, tag: str = "cmd", query: str = "") -> int:
+    """从 Eagle 图库取图（支持按关键词/标签筛选，无匹配则随机）并发送，返回发送张数（0=没取到图）。"""
+    img_list = await asyncio.to_thread(_pick_eagle_image, count, query) if query else await asyncio.to_thread(_pick_eagle_image, count)
     if not img_list:
         return 0
     paths = []
@@ -155,15 +150,17 @@ async def send_eagle_images(send, count: int, tag: str = "cmd") -> int:
     return len(img_list)
 
 
-def _pick_eagle_image(count: int = 1) -> list[bytes]:
-    """从 Eagle 图库随机选 count 张图，返回图片字节列表（最多10张）。"""
+def _pick_eagle_image(count: int = 1, query: str = "") -> list[bytes]:
+    """从 Eagle 图库选 count 张图（支持按标签/分类/名称 query 筛选，找不到则随机），返回图片字节列表（最多10张）。"""
+    import json as _json
     import os
     from io import BytesIO
     from PIL import Image
     count = max(1, min(count, 10))
     results = []
     try:
-        images_dir = os.path.join(_eagle_library_dir(), "images")
+        lib_dir = _eagle_library_dir()
+        images_dir = os.path.join(lib_dir, "images")
         if not os.path.isdir(images_dir):
             logger.warning(f"[指令] Eagle 图库目录不存在: {images_dir}")
             return results
@@ -173,11 +170,37 @@ def _pick_eagle_image(count: int = 1) -> list[bytes]:
             return results
         random.shuffle(folders)
         valid_ext = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
-        for folder in folders[:50]:
-            if len(results) >= count:
-                break
-            folder_path = os.path.join(images_dir, folder)
+        q = (query or "").strip().lower()
+        folder_map = {}
+        if q:
             try:
+                lib_meta = os.path.join(lib_dir, "metadata.json")
+                if os.path.isfile(lib_meta):
+                    with open(lib_meta, "r", encoding="utf-8", errors="replace") as mf:
+                        mdata = _json.load(mf)
+                    for fd in (mdata.get("folders") or []):
+                        if isinstance(fd, dict) and fd.get("id") and fd.get("name"):
+                            folder_map[str(fd["id"])] = str(fd["name"]).lower()
+            except Exception:
+                pass
+
+        def _try_load(folder_name: str, require_match: bool) -> bytes | None:
+            folder_path = os.path.join(images_dir, folder_name)
+            try:
+                if require_match and q:
+                    meta_path = os.path.join(folder_path, "metadata.json")
+                    if not os.path.isfile(meta_path):
+                        return None
+                    with open(meta_path, "r", encoding="utf-8", errors="replace") as f:
+                        meta = _json.load(f)
+                    if meta.get("isDeleted"):
+                        return None
+                    tags = [str(t).lower() for t in (meta.get("tags") or [])]
+                    name = str(meta.get("name") or "").lower()
+                    fnames = [folder_map.get(str(fid), "") for fid in (meta.get("folders") or [])]
+                    hay = " ".join(tags + [name] + fnames)
+                    if q not in hay and not any(t in q for t in tags if len(t) >= 2):
+                        return None
                 files = os.listdir(folder_path)
                 img_files = [
                     f for f in files
@@ -186,19 +209,33 @@ def _pick_eagle_image(count: int = 1) -> list[bytes]:
                     and os.path.splitext(f)[1].lower() in valid_ext
                 ]
                 if not img_files:
-                    continue
+                    return None
                 img_path = os.path.join(folder_path, img_files[0])
                 size = os.path.getsize(img_path)
-                if size < 1024 or size > 10 * 1024 * 1024:
-                    continue
+                if size < 1024 or size > 15 * 1024 * 1024:
+                    return None
                 with open(img_path, "rb") as f:
                     data = f.read()
                 img = Image.open(BytesIO(data))
                 img.load()
-                results.append(data)
-                logger.info(f"[指令] 从 Eagle 图库选中: {img_path}")
+                logger.info(f"[指令] 从 Eagle 图库选中({"匹配:" + q if require_match and q else "随机"}): {img_path}")
+                return data
             except Exception:
-                continue
+                return None
+
+        if q:
+            for folder in folders[:800]:
+                if len(results) >= count:
+                    break
+                d = _try_load(folder, True)
+                if d:
+                    results.append(d)
+        for folder in folders[:80]:
+            if len(results) >= count:
+                break
+            d = _try_load(folder, False)
+            if d:
+                results.append(d)
     except Exception as e:
         logger.warning(f"[指令] 读取 Eagle 图库失败: {e}")
     return results

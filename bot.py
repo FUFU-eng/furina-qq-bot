@@ -29,13 +29,33 @@ from furina.core import db, http, images, llm, paths  # noqa: E402
 from furina.core.logging import setup_file_logging  # noqa: E402
 
 
-def load_all_plugins() -> None:
+def load_all_plugins() -> list[str]:
+    """加载 furina/plugins 下所有插件，返回加载失败的插件名（NoneBot 只记日志不抛错）。"""
     import furina.plugins as pkg
 
     disabled = {x.strip() for x in os.environ.get("FURINA_DISABLED_PLUGINS", "").split(",") if x.strip()}
+    failed = []
     for mod in sorted(pkgutil.iter_modules(pkg.__path__), key=lambda m: m.name):
         if mod.ispkg and not mod.name.startswith("_") and mod.name not in disabled:
-            nonebot.load_plugin(f"furina.plugins.{mod.name}")
+            if nonebot.load_plugin(f"furina.plugins.{mod.name}") is None:
+                failed.append(mod.name)
+    return failed
+
+
+PLUGIN_STATE = os.path.join(ROOT, "data", "plugin_load.json")
+
+
+def _save_plugin_state(failed: list[str]) -> None:
+    """正式启动时记下哪些插件本来就加载不了（缺依赖等），面板「重启前试加载」只拦新冒出来的失败。"""
+    import json
+    import time
+
+    try:
+        os.makedirs(os.path.dirname(PLUGIN_STATE), exist_ok=True)
+        with open(PLUGIN_STATE, "w", encoding="utf-8") as f:
+            json.dump({"failed": failed, "ts": time.time()}, f, ensure_ascii=False)
+    except OSError:
+        pass
 
 
 def create_app():
@@ -51,7 +71,11 @@ def create_app():
         await http.aclose_all()
         db.close()
 
-    load_all_plugins()
+    failed = load_all_plugins()
+    if os.environ.get("FURINA_TRIAL_LOAD") == "1":
+        print("FURINA_TRIAL_FAILED=" + ",".join(failed))
+    else:
+        _save_plugin_state(failed)
     return driver
 
 

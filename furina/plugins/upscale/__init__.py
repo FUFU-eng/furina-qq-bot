@@ -117,7 +117,7 @@ def upscale_pattern_scan(msg: str) -> bool:
 # NapCat 新版发送的消息段是 [at:qq=X] / [reply:id=X] 这种「无 CQ: 前缀」的现代格式，
 # 旧版是 [CQ:at,qq=X] / [CQ:reply,id=X]。两个都要兼容，否则艾特/引用检测失效、强化无法触发。
 _AT_RE = re.compile(r"\[(?:CQ:)?at[:,]qq=(\d+)\]")
-_REPLY_RE = re.compile(r"\[(?:CQ:)?reply[,:]id=(\d+)\]")
+_REPLY_RE = re.compile(r"\[(?:CQ:)?reply[,:]id=(-?\d+)\]")
 _IMG_RE = re.compile(r"\[(?:CQ:)?image\b")
 
 
@@ -182,23 +182,56 @@ async def _extract_all_images_from_reply(event, bot) -> list:
     """从引用消息中提取所有图片（包括合并转发/长消息），返回 [(url, file_id), ...]"""
     images = []
 
-    def _collect_from_segments(segments):
+    def _collect_from_segments(segments) -> bool:
+        found = False
         for stype, sdata in _iter_segments(segments):
             if stype == "image":
                 url = str(sdata.get("url", "") or "")
                 fid = str(sdata.get("file", "") or "")
                 if url or fid:
                     images.append((url, fid))
+                    found = True
+        return found
 
-    async def _extract_forward(forward_id: str):
-        """从合并转发/长消息中提取所有图片"""
-        if not forward_id or forward_id == "0":
+    def _collect_from_forward_nodes(nodes, depth: int = 0) -> bool:
+        """遍历节点消息；嵌套 inline 转发最多展开两层，避免异常输入造成无限递归。"""
+        if depth > 2 or not isinstance(nodes, (list, tuple)):
+            return False
+        found = False
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            payload = node.get("data") if node.get("type") == "node" else node
+            payload = payload if isinstance(payload, dict) else node
+            message = payload.get("message") or payload.get("content") or []
+            if isinstance(message, dict):
+                message = [message]
+            found = _collect_from_segments(message) or found
+            if depth < 2:
+                for stype, sdata in _iter_segments(message):
+                    if stype in ("forward", "longmsg"):
+                        inline = sdata.get("content")
+                        if isinstance(inline, list) and inline:
+                            found = _collect_from_forward_nodes(inline, depth + 1) or found
+        return found
+
+    async def _extract_forward(forward_id: str, inline_nodes=None):
+        """从合并转发/长消息中提取所有图片；新版节点优先，旧版按 id 拉取。"""
+        inline_found = _collect_from_forward_nodes(inline_nodes) if isinstance(inline_nodes, list) else False
+        if inline_found or not forward_id or forward_id == "0":
             return
         try:
             forward_msg = await bot.get_forward_msg(message_id=forward_id)
-            msgs = forward_msg.get("messages", []) if isinstance(forward_msg, dict) else []
-            for msg in msgs:
-                _collect_from_segments(msg.get("message", []))
+            if isinstance(forward_msg, dict):
+                data = forward_msg.get("data")
+                data = data if isinstance(data, dict) else {}
+                msgs = forward_msg.get("messages") or data.get("messages") or []
+            else:
+                msgs = []
+            # SnowLuma 的内层合并转发只给 id，先补成内联 content 再取图
+            from ...core import forwards
+            await forwards.inline_nested(bot, msgs)
+            _collect_from_forward_nodes(msgs)
             logger.info(f"[强化] 从合并转发 {forward_id} 提取到 {len(images)} 张图")
         except Exception as e:
             logger.warning(f"[强化] 获取合并转发消息失败: {e}")
@@ -210,7 +243,8 @@ async def _extract_all_images_from_reply(event, bot) -> list:
         for stype, sdata in _iter_segments(event.reply.message):
             if stype in ("forward", "longmsg"):
                 fid = str(sdata.get("id", "") or sdata.get("res_id", "") or "")
-                await _extract_forward(fid)
+                inline = sdata.get("content")
+                await _extract_forward(fid, inline if isinstance(inline, list) else None)
 
     # 如果 event.reply 解析不出，用 get_msg 拉取原消息
     if not images:
@@ -227,45 +261,41 @@ async def _extract_all_images_from_reply(event, bot) -> list:
                 for stype, sdata in _iter_segments(raw_msg):
                     if stype in ("forward", "longmsg"):
                         fid = str(sdata.get("id", "") or sdata.get("res_id", "") or "")
-                        await _extract_forward(fid)
+                        inline = sdata.get("content")
+                        await _extract_forward(fid, inline if isinstance(inline, list) else None)
             except Exception as e:
                 logger.warning(f"[强化] get_msg 拉取引用消息失败: {e}")
 
     return images
 
-
 async def _fetch_image_bytes(bot, file_id: str, url: str) -> bytes | None:
-    """取图片字节：优先 NapCat 本地缓存，失败再 httpx 下载。"""
-    if file_id:
+    """取图片字节：优先协议端本地缓存（NapCat），再 httpx 下载刷新过的地址（SnowLuma）/消息原地址。"""
+    from ...core import images
+
+    # NapCat 本地缓存命中是毫秒级；若本地无此图（如合并转发内层图未缓存），
+    # get_image 会尝试联网并卡到全局 API 超时（曾因此每张白等约 30 秒）。
+    # 这里只给 4 秒，拿不到立刻转 httpx 下载，避免被全局长超时拖死。
+    local_path, fresh = await images.lookup_image(bot, file_id, timeout=4.0)
+    if local_path:
         try:
-            # NapCat 本地缓存命中是毫秒级；若本地无此图（如合并转发内层图未缓存），
-            # get_image 会尝试联网并卡到全局 API 超时（曾因此每张白等约 30 秒）。
-            # 这里只给 4 秒，拿不到立刻转 httpx 下载，避免被全局长超时拖死。
-            info = await asyncio.wait_for(bot.get_image(file=file_id), timeout=4.0)
-            if isinstance(info, dict):
-                local_path = info.get("file", "") or ""
-            else:
-                local_path = getattr(info, "file", "") or ""
-            if local_path and os.path.exists(local_path):
-                with open(local_path, "rb") as f:
-                    data = f.read()
-                if data:
-                    return data
-        except Exception as e:
+            with open(local_path, "rb") as f:
+                data = f.read()
+            if data:
+                return data
+        except OSError as e:
             logger.debug(f"[强化] 本地缓存获取失败: {e}")
-    if not url:
-        return None
-    try:
-        async with httpx.AsyncClient(
-            timeout=15,
-            follow_redirects=True,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"},
-        ) as client:
-            resp = await client.get(url)
-            if resp.status_code == 200 and resp.content and len(resp.content) > 100:
-                return resp.content
-    except Exception as e:
-        logger.debug(f"[强化] 图片下载失败: {e}")
+    for u in images.download_candidates(fresh, url):
+        try:
+            async with httpx.AsyncClient(
+                timeout=15,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"},
+            ) as client:
+                resp = await client.get(u)
+                if resp.status_code == 200 and resp.content and len(resp.content) > 100:
+                    return resp.content
+        except Exception as e:
+            logger.debug(f"[强化] 图片下载失败: {e}")
     return None
 
 

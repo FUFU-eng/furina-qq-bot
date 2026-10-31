@@ -133,7 +133,10 @@ class WakeTest(unittest.TestCase):
     def _reason(self, st, **kw):
         e = {"at": False, "bot": False, "ts": time.time(), "reply": "", "text": "", **kw}
         ev = SimpleNamespace(self_id=st.sid)
-        return asyncio.run(kernel._wake_reason(ev, st, e))
+        # 这里只测唤醒分支，不测真实时钟的峰谷概率；两套峰时判断都固定，避免下午随机失败。
+        with mock.patch.object(kernel.core_llm, "is_peak", return_value=False), \
+                mock.patch("furina.plugins.chat.dice.peak_factor", return_value=1.0):
+            return asyncio.run(kernel._wake_reason(ev, st, e))
 
     def test_wake_reasons_each_switchable(self):
         st = kernel.GState("10001", 555)
@@ -273,12 +276,20 @@ class WakeTest(unittest.TestCase):
                 self.assertEqual(sent, [("a.png", "image"), ("a.txt", "file")])
             _env.write_env("")
             self.assertFalse(call("run_shell", {"command": "echo hi"})["ok"])  # 开关关了就不能用
-            # 群会话拿不到 Agent 工具
+            # 群会话在 Agent 开启时也能直接调用 run_shell / draw_picture
             gctx = kernel.RunCtx("group", "10005", 559)
             kernel._runs["e" * 32] = gctx
             _env.write_env("AI_CHAT_AGENT_ENABLED=true\n")
             r = asyncio.run(kernel.handle_tool_callback({"run_id": "e" * 32, "name": "run_shell", "arguments": {"command": "echo hi"}}))
-            self.assertFalse(r["ok"])
+            self.assertTrue(r["ok"])
+            async def fake_send(ctx_, path, kind, name=""):
+                return {"ok": True, "sent": 1}
+            with mock.patch.object(kernel, "_agent_send_media", fake_send):
+                r_draw = asyncio.run(kernel.handle_tool_callback({
+                    "run_id": "e" * 32, "name": "draw_picture",
+                    "arguments": {"code": "img = Image.new('RGB', (64, 64), (80, 120, 220))"}
+                }))
+                self.assertTrue(r_draw["ok"])
         finally:
             kernel._runs.pop("d" * 32, None)
             kernel._runs.pop("e" * 32, None)
@@ -302,6 +313,9 @@ class Sim2FeelTest(unittest.TestCase):
         brain.clear_wake_overrides()
 
     def test_follow_wake(self):
+        p = mock.patch.object(kernel.core_llm, "is_peak", return_value=False)  # 高峰时段会按概率少醒
+        p.start()
+        self.addCleanup(p.stop)
         st = kernel.GState("10011", 571)
         _env.write_env("AI_CHAT_WAKE_RANDOM=0\nAI_CHAT_WAKE_IDLE_MINUTES=0\n")
         ev = SimpleNamespace(self_id=st.sid)

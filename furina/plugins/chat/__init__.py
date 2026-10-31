@@ -11,6 +11,7 @@ from nonebot.plugin import PluginMetadata
 from . import digest, history, ownlife, presence, proactive, seek, tts  # noqa: F401  注册启动/连接钩子
 from .handlers import handle_chat, handle_group_increase, handle_poke, handle_summary
 from . import kernel  # noqa: F401  二代仿真 / Agent 内核（注册回调接口）
+from . import banned  # noqa: F401  发往 QQ 的最后一道关：主人禁止的句式
 from .matchers import _agent_private, _chat, _join, _poke, _summary
 
 __plugin_meta__ = PluginMetadata(

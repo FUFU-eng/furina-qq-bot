@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 
 import httpx
 from nonebot import logger
@@ -68,19 +67,19 @@ async def gather_images(bot, message, sender_name: str = "", depth: int = 0, out
 
 
 async def fetch_bytes(bot, file: str, url: str) -> bytes | None:
-    """优先读 NapCat 本地缓存，失败再直接下载（QQ 图床不走代理）。"""
-    if file:
+    """优先读协议端本地缓存（NapCat），再下载协议端刷新过的地址（SnowLuma）/消息原地址（QQ 图床不走代理）。"""
+    from ...core import images
+
+    local, fresh = await images.lookup_image(bot, file)
+    if local:
         try:
-            info = await bot.get_image(file=file)
-            p = str((info or {}).get("file") or "")
-            if p and os.path.exists(p):
-                return await asyncio.to_thread(_read, p)
-        except Exception as e:  # noqa: BLE001
+            return await asyncio.to_thread(_read, local)
+        except OSError as e:
             logger.debug(f"[筛图] 本地缓存取图失败: {e}")
-    if url.startswith("http"):
+    for u in images.download_candidates(fresh, url):
         try:
             async with httpx.AsyncClient(timeout=30, follow_redirects=True, trust_env=False) as c:
-                r = await c.get(url)
+                r = await c.get(u)
                 if r.status_code == 200 and r.content:
                     return r.content
         except Exception as e:  # noqa: BLE001

@@ -10,6 +10,17 @@ from .state import _desc_stats, _sticker_stats
 
 _CJK = r"\u4e00-\u9fff\u3400-\u4dbf"
 
+# QQ 表情的原始占位编码不是可以直接发出去的表情段。模型偶尔会抄出这种
+# 「e编号:十六进制串|数字」长标记；只匹配这个结构，不泛删普通括号或数字。
+_QQ_FACE_PLACEHOLDER = re.compile(
+    r"\[\s*e\d{1,8}\s*:\s*[0-9a-f]{1,64}\s*\|\s*\d{1,20}\s*\]", re.I
+)
+
+
+def strip_qq_placeholders(text: str) -> str:
+    """只清掉文字中的原始表情占位串，真实 face/mface/图片段由发送层保留。"""
+    return _QQ_FACE_PLACEHOLDER.sub("", text or "")
+
 
 def drop_periods(text: str) -> str:
     """聊天单句号：中间换逗号、末尾去掉；代码/网址/小数/文件名及无语省略号保留。"""
@@ -199,7 +210,7 @@ def _desc_allowed(group_id: int) -> bool:
 def _strip_context_markers(text: str) -> str:
     """清理模型从上下文历史里学来的占位符（[图片]、[@某人]、[表情]、[视频]、[合并转发]等）
     以及"图片"尾巴、昵称前缀、元信息复述。这些只是历史记录的格式标记，模型误模仿到回复里要删掉。"""
-    t = (text or "").strip()
+    t = strip_qq_placeholders(text).strip()
     # 0) 去掉模型复述的引用描述（如"（引用了XXX的消息：「...」）"、"引用了XXX的消息：..."）
     t = re.sub(r"[（(]\s*引用了[^）)]*的消息[^）)]*[）)]\s*", "", t)
     t = re.sub(r"^引用了[^：:]*的消息[：:]\s*", "", t)
@@ -209,6 +220,9 @@ def _strip_context_markers(text: str) -> str:
     #      模型偶尔会把历史消息里的昵称当成回复开头，需要剥掉
     #      （纯数字开头的是时间，如“8:30 叫你”，不能当昵称剥掉，否则会变成“30 叫你”）
     t = re.sub(r"^(?![0-9]+[：:])[\u4e00-\u9fa5a-zA-Z0-9_]{1,12}[：:]\s*", "", t).strip()
+    # 0.25) 去掉模型误把提示词里的说明词（如「，改口」「（改口）」「，停顿」）写进句子末尾
+    t = re.sub(r"[，,、\s…—]*(?:[（(]?\s*(?:改口|停顿|嘴硬|傲娇|小声)\s*[）)]?)[。！!？?~～…\s]*$", "", t).strip()
+    t = re.sub(r"^嗯哼，此刻", "嗯哼，", t)
     # 0.3) 去掉元信息复述：包含"随机接话""自然接话""当前场景""说话人是"等词的句子
     for meta_word in ("随机接话", "自然接话", "当前场景", "说话人是", "说话人：", "不是TA在特意找你"):
         if meta_word in t:

@@ -43,8 +43,8 @@ class SpendPageMixin:
         page = QWidget()
         page.setObjectName("stackPage")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 8)
+        layout.setSpacing(14)
 
         head = QHBoxLayout()
         self.spend_status = self._label("打开本页时自动读取…", "pageSubLabel", 11)
@@ -64,12 +64,13 @@ class SpendPageMixin:
             frame = QFrame()
             frame.setObjectName("contentSurface")
             lay = QVBoxLayout(frame)
-            lay.setContentsMargins(14, 10, 14, 10)
-            lay.setSpacing(2)
-            lay.addWidget(self._label(title, "sectionLabel", 11))
+            lay.setContentsMargins(16, 14, 16, 14)
+            lay.setSpacing(4)
+            cap = self._label(title, "pageSubLabel", 11)
+            lay.addWidget(cap)
             val = QLabel("--")
             val.setTextFormat(Qt.RichText)
-            val.setStyleSheet("background:transparent; color:#f4f7ff; font-size:22px; font-weight:bold;")
+            val.setStyleSheet("background:transparent; color:#f1f5f9; font-size:24px; font-weight:bold;")
             sub = QLabel("")
             sub.setTextFormat(Qt.RichText)
             sub.setWordWrap(True)
@@ -84,18 +85,20 @@ class SpendPageMixin:
         chart_box = QFrame()
         chart_box.setObjectName("contentSurface")
         cl = QVBoxLayout(chart_box)
-        cl.setContentsMargins(12, 10, 12, 10)
+        cl.setContentsMargins(16, 14, 16, 12)
         cl.setSpacing(4)
         self.spend_chart_title = self._label("每天花了多少（元）", "sectionLabel", 11)
         cl.addWidget(self.spend_chart_title)
         self.spend_chart_holder = QVBoxLayout()
         cl.addLayout(self.spend_chart_holder, 1)
-        layout.addWidget(chart_box, 3)
+        chart_box.setMinimumHeight(300)
+        chart_box.setMaximumHeight(400)
+        layout.addWidget(chart_box)
 
         feat_box = QFrame()
         feat_box.setObjectName("contentSurface")
         fl = QVBoxLayout(feat_box)
-        fl.setContentsMargins(14, 10, 14, 12)
+        fl.setContentsMargins(16, 14, 16, 14)
         fl.setSpacing(6)
         fl.addWidget(self._label("今天钱花在哪（机器人自己记的账，按功能）", "sectionLabel", 11))
         self.spend_features = QLabel("…")
@@ -103,13 +106,29 @@ class SpendPageMixin:
         self.spend_features.setWordWrap(True)
         self.spend_features.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         self.spend_features.setStyleSheet("background:transparent; color:#dbe4f3; font-size:12px;")
-        area = QScrollArea()
-        area.setWidgetResizable(True)
-        area.setFrameShape(QFrame.NoFrame)
-        area.setStyleSheet("QScrollArea{background:transparent;border:none;} QScrollArea > QWidget > QWidget{background:transparent;}")
-        area.setWidget(self.spend_features)
-        fl.addWidget(area, 1)
-        layout.addWidget(feat_box, 2)
+        fl.addWidget(self.spend_features)
+        layout.addWidget(feat_box)
+
+        # 二代仿真花费看板：按群 / 每一轮 / 积极性（参考 bluefishovo「令牌与花费」、fatfish 的花钱感知）
+        board_box = QFrame()
+        board_box.setObjectName("contentSurface")
+        bl = QVBoxLayout(board_box)
+        bl.setContentsMargins(16, 14, 16, 14)
+        bl.setSpacing(6)
+        bh = QHBoxLayout()
+        bh.addWidget(self._label("二代仿真花费看板（按群 · 每一轮）", "sectionLabel", 11), 1)
+        bh.addWidget(self._tool_button("每一轮明细", self._spend_rounds_dialog))
+        bh.addWidget(self._tool_button("花钱感知设置", lambda: self._open_settings("brain")))
+        bl.addLayout(bh)
+        self.spend_board = QLabel("…")
+        self.spend_board.setTextFormat(Qt.RichText)
+        self.spend_board.setWordWrap(True)
+        self.spend_board.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.spend_board.setStyleSheet("background:transparent; color:#dbe4f3; font-size:12px;")
+        bl.addWidget(self.spend_board)
+        layout.addWidget(board_box)
+        layout.addStretch(1)
+        self._spend_board_data = {}
 
         self._spend_bus = _SpendBus(page)
         self._spend_bus.done.connect(self._on_spend_data)
@@ -222,6 +241,7 @@ class SpendPageMixin:
 
         self._spend_draw_chart(days if web else {d: x.get("cost", 0.0) for d, x in local.items()}, bool(web))
         self._spend_render_features(snap.get("features") or [], local_today)
+        self._spend_render_board(snap.get("board") or {})
 
         when = time.strftime("%H:%M", time.localtime(float(snap.get("ts") or time.time())))
         bits = [f"更新于 {when}" + ("（上次的数据，正在重新读取）" if snap.get("stale") else "")]
@@ -250,9 +270,9 @@ class SpendPageMixin:
         chart = QChart()
         chart.addSeries(series)
         ax = QBarCategoryAxis()
-        ax.append([f"{d.month}/{d.day}" for d in dates])
+        # 每 3 天标一个日期、横着放（类目名必须唯一：不标的那天用不同长度的空白占位）
+        ax.append([f"{d.month}/{d.day}" if (len(dates) - 1 - i) % 3 == 0 else " " * (i + 1) for i, d in enumerate(dates)])
         ax.setLabelsFont(QFont("Microsoft YaHei", 8))
-        ax.setLabelsAngle(-50)  # 斜着放，30 天的日期都放得下
         if hasattr(ax, "setTruncateLabels"):
             ax.setTruncateLabels(False)  # 不然会被省略成「1…」
         ax.setGridLineVisible(False)
@@ -260,18 +280,23 @@ class SpendPageMixin:
         series.attachAxis(ax)
         ay = QValueAxis()
         top = max(vals) if vals else 0
-        ay.setRange(0, max(0.05, top * 1.15))
-        ay.setLabelFormat("%.2f" if top < 10 else "%.0f")
+        step = next((x for x in (0.01, 0.02, 0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 2.5, 5, 10, 20, 25, 50, 100)
+                     if top / x <= 5), 200)
+        ticks = max(1, -(-top // step)) if top > 0 else 1
+        ay.setRange(0, step * ticks)
+        ay.setTickCount(int(ticks) + 1)
+        ay.setLabelFormat("%.2f" if step < 0.1 else "%.1f" if step < 1 else "%.0f")
         ay.setLabelsFont(QFont("Microsoft YaHei", 9))
         chart.addAxis(ay, Qt.AlignLeft)
         series.attachAxis(ay)
         chart.legend().hide()
-        chart.setBackgroundBrush(QBrush(QColor("#0a101e")))
-        chart.setMargins(QMargins(4, 4, 4, 4))
+        chart.setBackgroundBrush(QBrush(QColor(SURFACE)))
+        chart.setBackgroundRoundness(0)
+        chart.setMargins(QMargins(0, 6, 0, 0))
         for a in (ax, ay):
-            a.setLabelsColor(QColor("#cbd5e1"))
-            a.setLinePenColor(QColor("#334155"))
-            a.setGridLineColor(QColor("#1e293b"))
+            a.setLabelsColor(QColor(TEXT_SECONDARY))
+            a.setLinePenColor(QColor("#2a3750"))
+            a.setGridLineColor(QColor("#222e44"))
         bset.hovered.connect(lambda on, i, ds=dates, vs=vals: self.spend_chart_title.setText(
             f"每天花了多少（元） · {ds[i].month}/{ds[i].day}：{_yuan(vs[i], 3)}" if on else self._spend_chart_caption))
         if self._spend_chart_view is None:
@@ -310,6 +335,73 @@ class SpendPageMixin:
                "「回复」和「判断要不要接话」多半来自随机接话：想省钱可以在「省钱设置 → 随机接话会变高的时候」调低"
                "「她刚说过话、还留着」「说话的人刚和她聊着」。</span>")
         self.spend_features.setText("<table>" + "".join(rows) + "</table>" + tip)
+
+    # ---------------- 二代仿真花费看板 ----------------
+    def _spend_render_board(self, board):
+        self._spend_board_data = board or {}
+        if not board:
+            self.spend_board.setText(f"<span style='color:{_MUTED}'>还没有数据（二代仿真跑过一轮后就有）。</span>")
+            return
+        b = board.get("budget") or {}
+        cap = f"{_yuan(b.get('daily_cap'))}/天" if b.get("daily_cap") else "不限"
+        over = {"daily": "<b style='color:#f87171'>今天已到上限：只回被叫到的，不开思考</b>",
+                "group": "<b style='color:#f87171'>有群到了单群上限</b>"}.get(b.get("over_cap") or "", "")
+        head = (f"今天 <b>{_yuan(b.get('today'), 3)}</b> · 最近 24 小时 {_yuan(b.get('last24h'), 3)} · 每日上限 {cap}"
+                f"<br>她现在的积极性 <b>{float(b.get('willingness') or 0) * 100:.0f}%</b>"
+                f"（没人叫时接话 {float(b.get('follow_p') or 0) * 100:.0f}% · 随手刷到 {float(b.get('random_p') or 0) * 100:.0f}%；"
+                f"被艾特 / 叫名字 / 引用永远照回）" + (f"<br>{over}" if over else "")
+                + ("" if b.get("enabled", True) else f"<br><span style='color:{_MUTED}'>花钱感知已关</span>"))
+        rows = []
+        for r in board.get("today") or []:
+            rows.append(
+                f"<tr><td style='padding:3px 12px 3px 0'>{_E(r.get('name', ''))}</td>"
+                f"<td style='padding:3px 12px 3px 0;color:{_MUTED}' align='right'>{r.get('rounds', 0)} 轮 / {r.get('calls', 0)} 次</td>"
+                f"<td style='padding:3px 12px 3px 0;color:{_MUTED}' align='right'>输入 {_big(r.get('hit', 0) + r.get('miss', 0))} · 命中 {r.get('hit_rate', 0) * 100:.0f}%</td>"
+                f"<td style='padding:3px 12px 3px 0;color:{_MUTED}' align='right'>每轮 {_yuan(r.get('per_round'), 4)}</td>"
+                f"<td style='padding:3px 0' align='right'><b>{_yuan(r.get('cost'), 3)}</b></td></tr>")
+        table = ("<table>" + "".join(rows) + "</table>") if rows else f"<span style='color:{_MUTED}'>今天二代仿真还没跑过。</span>"
+        hours = board.get("hourly") or []
+        top = max((h.get("cost", 0) for h in hours), default=0) or 1e-9
+        hot = " ".join(f"{h['hour']}点 {_yuan(h['cost'], 2)}" for h in sorted(hours, key=lambda h: -h.get("cost", 0))[:4] if h.get("cost"))
+        days = {}
+        for r in board.get("days") or []:
+            days[r["day"]] = days.get(r["day"], 0.0) + float(r.get("cost") or 0)
+        trend = " · ".join(f"{d[5:]} {_yuan(v, 2)}" for d, v in sorted(days.items())[-7:])
+        self.spend_board.setText(head + "<br><br>" + table
+                                 + (f"<br><span style='color:{_MUTED}'>今天最烧钱的几个小时：{hot}</span>" if hot and top else "")
+                                 + (f"<br><span style='color:{_MUTED}'>最近几天（二代仿真）：{trend}</span>" if trend else ""))
+
+    def _spend_rounds_dialog(self):
+        rec = (self._spend_board_data or {}).get("recent") or []
+        dlg = QDialog(self)
+        dlg.setWindowTitle("二代仿真 · 每一轮花了多少（今天，最近 80 轮）")
+        dlg.resize(980, 620)
+        lay = QVBoxLayout(dlg)
+        why = {"at": "被艾特", "reply": "被引用", "name": "叫名字", "follow": "接话", "random": "随手刷到",
+               "idle": "潜水久了", "back": "刷完B站", "limited": "次数到了", "promise": "答应的事到点"}
+        rows = []
+        for r in rec:
+            t = time.strftime("%H:%M:%S", time.localtime(float(r.get("t") or 0)))
+            act = "说了话" if r.get("said") else ("潜水" if r.get("silent") else ("失败" if not r.get("ok") else "没说"))
+            rows.append(
+                f"<tr><td style='padding:2px 10px 2px 0'>{t}</td><td style='padding:2px 10px 2px 0'>{_E(r.get('name', ''))}</td>"
+                f"<td style='padding:2px 10px 2px 0'>{why.get(r.get('why'), _E(str(r.get('why'))))}</td>"
+                f"<td style='padding:2px 10px 2px 0;color:{_MUTED}'>{_E(str(r.get('eff') or ''))}</td>"
+                f"<td style='padding:2px 10px 2px 0' align='right'>{r.get('calls', 0)} 次 / {r.get('steps', 0)} 步</td>"
+                f"<td style='padding:2px 10px 2px 0;color:{_MUTED}' align='right'>最长 {_big(r.get('max_in', 0))} · 未命中 {_big(r.get('miss', 0))} · 输出 {_big(r.get('out', 0))}</td>"
+                f"<td style='padding:2px 10px 2px 0' align='right'><b>{_yuan(r.get('cost'), 4)}</b></td>"
+                f"<td style='padding:2px 10px 2px 0'>{act}</td>"
+                f"<td style='padding:2px 0;color:{_MUTED}'>{_E(','.join(r.get('tools') or []))}</td></tr>")
+        lbl = QLabel(("<table>" + "".join(rows) + "</table>") if rows else "今天还没有记录。")
+        lbl.setTextFormat(Qt.RichText)
+        lbl.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lbl.setStyleSheet("background:transparent; color:#dbe4f3; font-size:12px;")
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setWidget(lbl)
+        lay.addWidget(area)
+        dlg.exec()
 
     # ---------------- 网站令牌 ----------------
     def _spend_token_dialog(self):

@@ -35,19 +35,41 @@ IDLE_EXIT = float(os.environ.get("FURINA_DSH_IDLE_EXIT_MIN", "30") or 0) * 60
 BRIDGE = PROJECT / "tools" / "dsh_bridge" / "furina-bridge.mjs"
 
 _lock = threading.RLock()
+_turn_lock = threading.Lock()
 _state: dict = {"harness": None, "resumed": set(), "busy": set(), "last": time.time(), "error": "", "started": 0.0}
 _server: ThreadingHTTPServer | None = None
 
 # 群聊会话只要 QQ 工具：会话日志上传、插件清单、会话标题（额外花钱）、MCP 一律不加载；
-# 没打开 Agent 时连 shell / 文件 / 子进程插件都不加载（不只是对模型隐藏）。
+# tool-working-directory 会在新会话末尾塞一条工作目录提示，干扰外接客户端读取用户消息，一律禁用（Agent 走 furina-bridge 的 run_shell）。
 _ALWAYS_OFF = ["session-log-deepseek", "plugin-package-inventory-deepseek", "deepseek-llm-api-extensions",
-               "session-title", "mcp-resources"]
-_SHELL = ["tool-fs", "tool-working-directory", "persistent-bash", "persistent-pwsh", "terminal-bash",
-          "terminal-pwsh", "pty", "subprocess"]
+               "session-title", "mcp-resources", "tool-working-directory", "persistent-bash", "persistent-pwsh",
+               "terminal-bash", "terminal-pwsh", "pty", "subprocess"]
+_SHELL = ["tool-fs"]
 
 
 def log(msg: str) -> None:
     print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+CUSTOM_PROVIDER = "furina-custom"
+
+
+def _custom() -> dict | None:
+    """外接模型线路（机器人在 env 里给）：走 DSH 自带的 pi-ai 多服务商适配器。"""
+    if os.environ.get("FURINA_DSH_PROVIDER", "") != "custom":
+        return None
+    base = os.environ.get("FURINA_DSH_CUSTOM_BASE_URL", "").strip().rstrip("/")
+    model = os.environ.get("FURINA_DSH_MODEL", "").strip()
+    if not base or not model:
+        return None
+    proto = os.environ.get("FURINA_DSH_CUSTOM_PROTOCOL", "anthropic-messages") or "anthropic-messages"
+    ctx = int(os.environ.get("FURINA_DSH_CUSTOM_CONTEXT", "200000") or 200000)
+    max_tokens = int(os.environ.get("FURINA_DSH_MAX_TOKENS", "8192") or 8192)
+    return {"model": model, "provider": {
+        "displayName": "外接模型", "api": proto, "baseURL": base, "apiKeyEnv": "FURINA_CUSTOM_KEY",
+        "streamIdleTimeoutMs": 90000,
+        "models": [{"id": model, "name": model, "contextWindow": ctx, "maxTokens": max_tokens, "input": ["text", "image"]}],
+    }}
 
 
 def _patch_file() -> Path:
@@ -60,6 +82,11 @@ def _patch_file() -> Path:
     patch += [{"id": "llm-deepseek", "config": llm_cfg},
               {"id": "tools", "config": {"mode": "native"}},
               {"insert": [{"id": "furina-bridge", "name": BRIDGE.resolve().as_posix()}]}]
+    custom = _custom()
+    if custom:
+        # sdk-minimal 里没有挂 pi-ai，单独插一份，只注册这一个服务商
+        patch.append({"insert": [{"id": "llm-custom", "name": "@deepseek-ai/dsh-llm-pi-ai",
+                                  "config": {"providers": {CUSTOM_PROVIDER: custom["provider"]}}}]})
     p = DATA / "furina.patch.yml"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(patch, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -85,17 +112,20 @@ def _harness():
             "DSH_DISABLE_TELEMETRY": "1", "DO_NOT_TRACK": "1",
         }
         max_tokens = int(os.environ.get("FURINA_DSH_MAX_TOKENS", "8192") or 8192)
+        custom = _custom()
         h = DeepSeekHarness(
-            provider="deepseek-official", model=os.environ.get("FURINA_DSH_MODEL", "deepseek-flash"),
+            provider=CUSTOM_PROVIDER if custom else "deepseek-official",
+            model=custom["model"] if custom else os.environ.get("FURINA_DSH_MODEL", "deepseek-flash"),
             reasoning_effort=None, max_tokens=max_tokens, cwd=str(work), dsh_home=str(home),
             profile="sdk-minimal", patches=(str(_patch_file()),), env=env,
-            api_key=os.environ.get("DEEPSEEK_API_KEY") or None,
+            api_key=None if custom else (os.environ.get("DEEPSEEK_API_KEY") or None),
             initialize_timeout_seconds=90,
         )
         t = time.time()
         h.start()
         _state.update(harness=h, started=time.time(), error="")
-        log(f"运行时已启动（{time.time() - t:.1f}s，Agent={'开' if AGENT else '关'}）")
+        log(f"运行时已启动（{time.time() - t:.1f}s，Agent={'开' if AGENT else '关'}，"
+            f"模型={'外接 ' + custom['model'] if custom else 'DeepSeek'}）")
         return h
 
 
@@ -166,6 +196,18 @@ def _finish_reason(events) -> str:
     return ""
 
 
+def _turn_error(events) -> str:
+    """模型接口出错时 DSH 不抛异常，而是 turn/end 的 reason = error（重试几次后）。"""
+    for event in reversed(events or []):
+        if event.get("type") == "turn/end":
+            reason = (event.get("data") or {}).get("reason") or {}
+            if reason.get("kind") == "error":
+                e = reason.get("error") or {}
+                return str(e.get("message") or e.get("code") or "未知错误")[:300]
+            return ""
+    return ""
+
+
 def _run_turn(h, sid: str, prompt, timeout: float) -> list:
     """和 SDK 的 Session.run 一样，但带超时（桥接插件到点会取消这一轮，这里再兜一层）。"""
     client = h.client
@@ -214,7 +256,11 @@ def do_run(p: dict) -> dict:
         _state["busy"].add(sid)
     t0 = time.time()
     timeout = max(15.0, min(900.0, float(p.get("timeout") or 120)))
+    serialize = bool(_custom())
+    if serialize:
+        _turn_lock.acquire()
     try:
+        t0 = time.time()
         try:
             h = _harness()
         except Exception as e:  # noqa: BLE001
@@ -224,7 +270,7 @@ def do_run(p: dict) -> dict:
         ctx = _bridge("/context", {"session_id": sid, "run_id": rid, "persona": p.get("persona") or "",
                                    "max_steps": int(p.get("max_steps") or 8), "effort": p.get("effort") or "off",
                                    "effort_hi": p.get("effort_hi") or p.get("effort") or "off",
-                                   "timeout_ms": int(timeout * 1000)})
+                                   "timeout_ms": int(timeout * 1000), "end_after_say": bool(p.get("end_after_say", False))})
         if not ctx.get("ok"):
             return {"ok": False, "error": f"桥接插件拒绝：{ctx.get('reason') or ctx.get('status')}"}
         if sid not in _state["resumed"]:
@@ -246,6 +292,8 @@ def do_run(p: dict) -> dict:
             log("回合失败：" + traceback.format_exc()[-800:])
             if "closed" in err.lower() or "transport" in err.lower():
                 _drop_harness("运行时断开")
+        if not err and _turn_error(events):
+            err = "模型接口出错：" + _turn_error(events)
         res = _bridge("/result", {"session_id": sid, "run_id": rid}) if _state["harness"] is not None else {}
         out = {"ok": not err, "error": err, "final_response": _final_text(events), "finish_reason": _finish_reason(events),
                "usage": usage_rows(events), "silent": bool(res.get("silent")), "said": int(res.get("said") or 0),
@@ -255,6 +303,11 @@ def do_run(p: dict) -> dict:
         log(f"{sid[:18]} 完成 {out['seconds']}s 结束={out['finish_reason'] or err[:40]} 工具={','.join(out['tools'])[:120]}")
         return out
     finally:
+        if serialize:
+            try:
+                _turn_lock.release()
+            except RuntimeError:
+                pass
         with _lock:
             _state["busy"].discard(sid)
             _state["last"] = time.time()
@@ -287,6 +340,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True, "worker": "furina-dsh", "version": VERSION, "fingerprint": FINGERPRINT,
                                     "ready": _state["harness"] is not None, "busy": len(_state["busy"]),
                                     "agent": AGENT, "error": _state["error"], "pid": os.getpid(),
+                                    "provider": "custom" if _custom() else "deepseek",
                                     "uptime": round(time.time() - _state["started"]) if _state["started"] else 0})
         return self._send(404, {"ok": False})
 
